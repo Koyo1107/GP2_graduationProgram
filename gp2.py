@@ -285,7 +285,7 @@ from utils.datasets import *
 from utils.utils import *
 
 def detect(save_img=False):
-    imgsz = (320, 192) if ONNX_EXPORT else opt.img_size  # (320, 192) or (416, 256) or (608, 352) for (height, width)
+    imgsz = opt.img_size  # (320, 192) or (416, 256) or (608, 352) for (height, width)
     out, source, weights, half, view_img, save_txt = opt.output, opt.source, opt.weights, opt.half, opt.view_img, opt.save_txt
     webcam = source == '0' or source.startswith('rtsp') or source.startswith('http') or source.endswith('.txt')
 
@@ -317,21 +317,6 @@ def detect(save_img=False):
 
     # Fuse Conv2d + BatchNorm2d layers
     # model.fuse()
-
-    # Export mode
-    if ONNX_EXPORT:
-        model.fuse()
-        img = torch.zeros((1, 3) + imgsz)  # (1, 3, 320, 192)
-        f = opt.weights.replace(opt.weights.split('.')[-1], 'onnx')  # *.onnx filename
-        torch.onnx.export(model, img, f, verbose=False, opset_version=11,
-                          input_names=['images'], output_names=['classes', 'boxes'])
-
-        # Validate exported model
-        import onnx
-        model = onnx.load(f)  # Load the ONNX model
-        onnx.checker.check_model(model)  # Check that the IR is well formed
-        print(onnx.helper.printable_graph(model.graph))  # Print a human readable representation of the graph
-        return
 
     # Half precision
     half = half and device.type != 'cpu'  # half precision only supported on CUDA
