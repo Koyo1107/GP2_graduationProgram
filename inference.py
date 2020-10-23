@@ -1,3 +1,37 @@
+
+# Copyright 2018 The TensorFlow Authors All Rights Reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+# ==============================================================================
+
+"""Runs struct2depth at inference. Produces depth estimates, ego-motion and object motion."""
+
+# Example usage:
+#
+# python inference.py \
+#    --input_dir ~/struct2depth/kitti-raw-uncompressed/ \
+#    --output_dir ~/struct2depth/output \
+#    --model_ckpt ~/struct2depth/model/model-199160
+#    --file_extension png \
+#    --depth \
+#    --egomotion true \
+
+
+
+from __future__ import absolute_import
+from __future__ import division
+from __future__ import print_function
+
 import os
 from absl import app
 from absl import flags
@@ -12,6 +46,8 @@ import util
 
 gfile = tf.gfile
 
+# CMAP = 'plasma'
+
 INFERENCE_MODE_SINGLE = 'single'  # Take plain single-frame input.
 INFERENCE_MODE_TRIPLETS = 'triplets'  # Take image triplets as input.
 # For KITTI, we just resize input images and do not perform cropping. For
@@ -21,16 +57,80 @@ INFERENCE_MODE_TRIPLETS = 'triplets'  # Take image triplets as input.
 INFERENCE_CROP_NONE = 'none'
 INFERENCE_CROP_CITYSCAPES = 'cityscapes'
 
-input_dir = 'input'
-output_dir = 'output'
-model_ckpt = 'model/KITTI/model-199160'
 
-def _run_inference(output_dir=output_dir,
+flags.DEFINE_string('output_dir', None, 'Directory to store predictions.')
+flags.DEFINE_string('file_extension', 'png', 'Image data file extension of '
+                    'files provided with input_dir. Also determines the output '
+                    'file format of depth prediction images.')
+flags.DEFINE_bool('depth', True, 'Determines if the depth prediction network '
+                  'should be executed and its predictions be saved.')
+flags.DEFINE_bool('egomotion', False, 'Determines if the egomotion prediction '
+                  'network should be executed and its predictions be saved. If '
+                  'inference is run in single inference mode, it is assumed '
+                  'that files in the same directory belong in the same '
+                  'sequence, and sorting them alphabetically establishes the '
+                  'right temporal order.')
+flags.DEFINE_string('model_ckpt', None, 'Model checkpoint to evaluate.')
+flags.DEFINE_string('input_dir', None, 'Directory containing image files to '
+                    'evaluate. This crawls recursively for images in the '
+                    'directory, mirroring relative subdirectory structures '
+                    'into the output directory.')
+flags.DEFINE_string('input_list_file', None, 'Text file containing paths to '
+                    'image files to process. Paths should be relative with '
+                    'respect to the list file location. Relative path '
+                    'structures will be mirrored in the output directory.')
+flags.DEFINE_integer('batch_size', 1, 'The size of a sample batch')
+flags.DEFINE_integer('img_height', 128, 'Input frame height.')
+flags.DEFINE_integer('img_width', 416, 'Input frame width.')
+flags.DEFINE_integer('seq_length', 3, 'Number of frames in sequence.')
+flags.DEFINE_enum('architecture', nets.RESNET, nets.ARCHITECTURES,
+                  'Defines the architecture to use for the depth prediction '
+                  'network. Defaults to ResNet-based encoder and accompanying '
+                  'decoder.')
+flags.DEFINE_boolean('imagenet_norm', True, 'Whether to normalize the input '
+                     'images channel-wise so that they match the distribution '
+                     'most ImageNet-models were trained on.')
+flags.DEFINE_bool('use_skip', True, 'Whether to use skip connections in the '
+                  'encoder-decoder architecture.')
+flags.DEFINE_bool('joint_encoder', False, 'Whether to share parameters '
+                  'between the depth and egomotion networks by using a joint '
+                  'encoder architecture. The egomotion network is then '
+                  'operating only on the hidden representation provided by the '
+                  'joint encoder.')
+flags.DEFINE_bool('shuffle', False, 'Whether to shuffle the order in which '
+                  'images are processed.')
+flags.DEFINE_bool('flip', False, 'Whether images should be flipped as well as '
+                  'resulting predictions (for test-time augmentation). This '
+                  'currently applies to the depth network only.')
+flags.DEFINE_enum('inference_mode', INFERENCE_MODE_SINGLE,
+                  [INFERENCE_MODE_SINGLE,
+                   INFERENCE_MODE_TRIPLETS],
+                  'Whether to use triplet mode for inference, which accepts '
+                  'triplets instead of single frames.')
+flags.DEFINE_enum('inference_crop', INFERENCE_CROP_NONE,
+                  [INFERENCE_CROP_NONE,
+                   INFERENCE_CROP_CITYSCAPES],
+                  'Whether to apply a Cityscapes-specific crop on the input '
+                  'images first before running inference.')
+flags.DEFINE_bool('use_masks', False, 'Whether to mask out potentially '
+                  'moving objects when feeding image input to the egomotion '
+                  'network. This might improve odometry results when using '
+                  'a motion model. For this, pre-computed segmentation '
+                  'masks have to be available for every image, with the '
+                  'background being zero.')
+
+FLAGS = flags.FLAGS
+
+flags.mark_flag_as_required('output_dir')
+flags.mark_flag_as_required('model_ckpt')
+
+
+def _run_inference(output_dir=None,
                    file_extension='png',
                    depth=True,
-                   egomotion=True,
-                   model_ckpt=model_ckpt,
-                   input_dir=input_dir,
+                   egomotion=False,
+                   model_ckpt=None,
+                   input_dir=None,
                    input_list_file=None,
                    batch_size=1,
                    img_height=128,
@@ -45,7 +145,7 @@ def _run_inference(output_dir=output_dir,
                    inference_mode=INFERENCE_MODE_SINGLE,
                    inference_crop=INFERENCE_CROP_NONE,
                    use_masks=False):
-
+  """Runs inference. Refer to flags in inference.py for details."""
   inference_model = model.Model(is_training=False,
                                 batch_size=batch_size,
                                 img_height=img_height,
@@ -217,14 +317,17 @@ def _run_inference(output_dir=output_dir,
           written_before.append(output_filepath)
       logging.info('Done.')
 
+
 def mask_image_stack(input_image_stack, input_seg_seq):
   """Masks out moving image contents by using the segmentation masks provided.
+
   This can lead to better odometry accuracy for motion models, but is optional
   to use. Is only called if use_masks is enabled.
   Args:
     input_image_stack: The input image stack of shape (1, H, W, seq_length).
     input_seg_seq: List of segmentation masks with seq_length elements of shape
                    (H, W, C) for some number of channels C.
+
   Returns:
     Input image stack with detections provided by segmentation mask removed.
   """
@@ -274,201 +377,40 @@ def _recursive_glob(treeroot, pattern):
     results.extend(os.path.join(base, f) for f in files)
   return results
 
-#-----------------------------------------------------------------
-#yolov3
-
-
-import argparse
-
-from models import *  # set ONNX_EXPORT in models.py
-from utils.datasets import *
-from utils.utils import *
-
-def detect(save_img=False):
-    imgsz = (320, 192) if ONNX_EXPORT else opt.img_size  # (320, 192) or (416, 256) or (608, 352) for (height, width)
-    out, source, weights, half, view_img, save_txt = opt.output, opt.source, opt.weights, opt.half, opt.view_img, opt.save_txt
-    webcam = source == '0' or source.startswith('rtsp') or source.startswith('http') or source.endswith('.txt')
-
-    # Initialize
-    device = torch_utils.select_device(device='cpu' if ONNX_EXPORT else opt.device)
-    if os.path.exists(out):
-        shutil.rmtree(out)  # delete output folder
-    os.makedirs(out)  # make new output folder
-
-    # Initialize model
-    model = Darknet(opt.cfg, imgsz)
-
-    # Load weights
-    attempt_download(weights)
-    if weights.endswith('.pt'):  # pytorch format
-        model.load_state_dict(torch.load(weights, map_location=device)['model'])
-    else:  # darknet format
-        load_darknet_weights(model, weights)
-
-    # Second-stage classifier
-    classify = False
-    if classify:
-        modelc = torch_utils.load_classifier(name='resnet101', n=2)  # initialize
-        modelc.load_state_dict(torch.load('weights/resnet101.pt', map_location=device)['model'])  # load weights
-        modelc.to(device).eval()
-
-    # Eval mode
-    model.to(device).eval()
-
-    # Fuse Conv2d + BatchNorm2d layers
-    # model.fuse()
-
-
-    # Export mode
-    if ONNX_EXPORT:
-        model.fuse()
-        img = torch.zeros((1, 3) + imgsz)  # (1, 3, 320, 192)
-        f = opt.weights.replace(opt.weights.split('.')[-1], 'onnx')  # *.onnx filename
-        torch.onnx.export(model, img, f, verbose=False, opset_version=11,
-                          input_names=['images'], output_names=['classes', 'boxes'])
-
-        # Validate exported model
-        import onnx
-        model = onnx.load(f)  # Load the ONNX model
-        onnx.checker.check_model(model)  # Check that the IR is well formed
-        print(onnx.helper.printable_graph(model.graph))  # Print a human readable representation of the graph
-        return
-
-    # Half precision
-    half = half and device.type != 'cpu'  # half precision only supported on CUDA
-    if half:
-        model.half()
-
-    # Set Dataloader
-    vid_path, vid_writer = None, None
-    if webcam:
-        view_img = True
-        torch.backends.cudnn.benchmark = True  # set True to speed up constant image size inference
-        dataset = LoadStreams(source, img_size=imgsz)
-    else:
-        save_img = True
-        dataset = LoadImages(source, img_size=imgsz)
-
-    # Get names and colors
-    names = load_classes(opt.names)
-    colors = [[random.randint(0, 255) for _ in range(3)] for _ in range(len(names))]
-
-    # Run inference
-    t0 = time.time()
-    img = torch.zeros((1, 3, imgsz, imgsz), device=device)  # init img
-    _ = model(img.half() if half else img.float()) if device.type != 'cpu' else None  # run once
-    for path, img, im0s, vid_cap in dataset:
-        img = torch.from_numpy(img).to(device)
-        img = img.half() if half else img.float()  # uint8 to fp16/32
-        img /= 255.0  # 0 - 255 to 0.0 - 1.0
-        if img.ndimension() == 3:
-            img = img.unsqueeze(0)
-
-        # Inference
-        t1 = torch_utils.time_synchronized()
-        pred = model(img, augment=opt.augment)[0]
-        t2 = torch_utils.time_synchronized()
-
-        # to float
-        if half:
-            pred = pred.float()
-
-        # Apply NMS
-        pred = non_max_suppression(pred, opt.conf_thres, opt.iou_thres,
-                                   multi_label=False, classes=opt.classes, agnostic=opt.agnostic_nms)
-
-        # Apply Classifier
-        if classify:
-            pred = apply_classifier(pred, modelc, img, im0s)
-
-        # Process detections
-        for i, det in enumerate(pred):  # detections for image i
-            if webcam:  # batch_size >= 1
-                p, s, im0 = path[i], '%g: ' % i, im0s[i].copy()
-            else:
-                p, s, im0 = path, '', im0s
-
-            save_path = str(Path(out) / Path(p).name)
-            s += '%gx%g ' % img.shape[2:]  # print string
-            gn = torch.tensor(im0.shape)[[1, 0, 1, 0]]  #  normalization gain whwh
-            if det is not None and len(det):
-                # Rescale boxes from imgsz to im0 size
-                det[:, :4] = scale_coords(img.shape[2:], det[:, :4], im0.shape).round()
-
-                # Print results
-                for c in det[:, -1].unique():
-                    n = (det[:, -1] == c).sum()  # detections per class
-                    s += '%g %ss, ' % (n, names[int(c)])  # add to string
-
-                # Write results
-                for *xyxy, conf, cls in reversed(det):
-                    if save_txt:  # Write to file
-                        xywh = (xyxy2xywh(torch.tensor(xyxy).view(1, 4)) / gn).view(-1).tolist()  # normalized xywh
-                        with open(save_path[:save_path.rfind('.')] + '.txt', 'a') as file:
-                            file.write(('%g ' * 5 + '\n') % (cls, *xywh))  # label format
-
-                    if save_img or view_img:  # Add bbox to image
-                        label = '%s %.2f' % (names[int(cls)], conf)
-                        plot_one_box(xyxy, im0, label=label, color=colors[int(cls)])
-
-            # Print time (inference + NMS)
-            print('%sDone. (%.3fs)' % (s, t2 - t1))
-
-            # Stream results
-            if view_img:
-                cv2.imshow(p, im0)
-                if cv2.waitKey(1) == ord('q'):  # q to quit
-                    raise StopIteration
-
-            # Save results (image with detections)
-            if save_img:
-                if dataset.mode == 'images':
-                    cv2.imwrite(save_path, im0)
-                else:
-                    if vid_path != save_path:  # new video
-                        vid_path = save_path
-                        if isinstance(vid_writer, cv2.VideoWriter):
-                            vid_writer.release()  # release previous video writer
-
-                        fps = vid_cap.get(cv2.CAP_PROP_FPS)
-                        w = int(vid_cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-                        h = int(vid_cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-                        vid_writer = cv2.VideoWriter(save_path, cv2.VideoWriter_fourcc(*opt.fourcc), fps, (w, h))
-                    vid_writer.write(im0)
-
-    if save_txt or save_img:
-        print('Results saved to %s' % os.getcwd() + os.sep + out)
-        if platform == 'darwin':  # MacOS
-            os.system('open ' + save_path)
-
-    print('Done. (%.3fs)' % (time.time() - t0))
-
 
 def main(_):
-  _run_inference()
-  detect()
+  #if (flags.input_dir is None) == (flags.input_list_file is None):
+  #  raise ValueError('Exactly one of either input_dir or input_list_file has '
+  #                   'to be provided.')
+  #if not flags.depth and not flags.egomotion:
+  #  raise ValueError('At least one of the depth and egomotion network has to '
+  #                   'be called for inference.')
+  #if (flags.inference_mode == inference_lib.INFERENCE_MODE_TRIPLETS and
+  #    flags.seq_length != 3):
+  #  raise ValueError('For sequence lengths other than three, single inference '
+  #                   'mode has to be used.')
+
+  _run_inference(output_dir=FLAGS.output_dir,
+                 file_extension=FLAGS.file_extension,
+                 depth=FLAGS.depth,
+                 egomotion=FLAGS.egomotion,
+                 model_ckpt=FLAGS.model_ckpt,
+                 input_dir=FLAGS.input_dir,
+                 input_list_file=FLAGS.input_list_file,
+                 batch_size=FLAGS.batch_size,
+                 img_height=FLAGS.img_height,
+                 img_width=FLAGS.img_width,
+                 seq_length=FLAGS.seq_length,
+                 architecture=FLAGS.architecture,
+                 imagenet_norm=FLAGS.imagenet_norm,
+                 use_skip=FLAGS.use_skip,
+                 joint_encoder=FLAGS.joint_encoder,
+                 shuffle=FLAGS.shuffle,
+                 flip_for_depth=FLAGS.flip,
+                 inference_mode=FLAGS.inference_mode,
+                 inference_crop=FLAGS.inference_crop,
+                 use_masks=FLAGS.use_masks)
+
 
 if __name__ == '__main__':
-    parser = argparse.ArgumentParser()
-    parser.add_argument('--cfg', type=str, default='cfg/yolov3-spp.cfg', help='*.cfg path')
-    parser.add_argument('--names', type=str, default='data/coco.names', help='*.names path')
-    parser.add_argument('--weights', type=str, default='weights/yolov3-spp-ultralytics.pt', help='weights path')
-    parser.add_argument('--source', type=str, default='input', help='source')  # input file/folder, 0 for webcam
-    parser.add_argument('--output', type=str, default='output', help='output folder')  # output folder
-    parser.add_argument('--img-size', type=int, default=512, help='inference size (pixels)')
-    parser.add_argument('--conf-thres', type=float, default=0.3, help='object confidence threshold')
-    parser.add_argument('--iou-thres', type=float, default=0.6, help='IOU threshold for NMS')
-    parser.add_argument('--fourcc', type=str, default='mp4v', help='output video codec (verify ffmpeg support)')
-    parser.add_argument('--half', action='store_true', help='half precision FP16 inference')
-    parser.add_argument('--device', default='', help='device id (i.e. 0 or 0,1) or cpu')
-    parser.add_argument('--view-img', action='store_true', help='display results')
-    parser.add_argument('--save-txt', action='store_true', help='save results to *.txt')
-    parser.add_argument('--classes', nargs='+', type=int, help='filter by class')
-    parser.add_argument('--agnostic-nms', action='store_true', help='class-agnostic NMS')
-    parser.add_argument('--augment', action='store_true', help='augmented inference')
-    opt = parser.parse_args()
-    opt.cfg = check_file(opt.cfg)  # check file
-    opt.names = check_file(opt.names)  # check file
-    print(opt)
-    
-    app.run(main)
+  app.run(main)
