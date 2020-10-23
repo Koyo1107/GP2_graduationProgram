@@ -30,7 +30,7 @@ INFERENCE_CROP_NONE = 'none'
 INFERENCE_CROP_CITYSCAPES = 'cityscapes'
 
 input_dir = 'input'
-output_dir = 'output'
+output_dir = 'semioutput'
 model_ckpt = 'model/KITTI/model-199160'
 
 def _run_inference(output_dir=output_dir,
@@ -125,12 +125,10 @@ def _run_inference(output_dir=output_dir,
             k = i - len(im_batch) + 1 + j
             filename_root = os.path.splitext(os.path.basename(im_files[k]))[0]
             pref = '_flip' if flip_for_depth else ''
-            output_raw = os.path.join(
-                output_dirs[k], filename_root + pref + '.npy')
-            output_vis = os.path.join(
-                output_dirs[k], filename_root + pref + '.png')
-            with gfile.Open(output_raw, 'wb') as f:
-              np.save(f, est_depth[j])
+            #output_raw = os.path.join(output_dirs[k], filename_root + pref + '.npy')
+            output_vis = os.path.join(output_dirs[k], filename_root + pref + '.png')
+            #with gfile.Open(output_raw, 'wb') as f:
+            #  np.save(f, est_depth[j])
             util.save_image(output_vis, visualization, file_extension)
           im_batch = []
 
@@ -288,7 +286,7 @@ def _recursive_glob(treeroot, pattern):
 def detect(save_img=False): 
     img_size = 512 
     out = 'output'
-    source = 'input'
+    source = 'semioutput'
     weights = 'weights/yolov3-spp-ultralytics.pt'
     half = 'store_true'
     view_img = 'store_true'
