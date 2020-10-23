@@ -293,7 +293,7 @@ def detect(save_img=False):
     half = 'store_true'
     view_img = 'store_true'
     save_txt = 'store_true'
-    device_ = ''
+    #device_ = ''
     cfg_ = 'cfg/yolov3-spp.cfg'
     names_ = 'data/coco.names'
     augment_ = 'store_true'
@@ -305,7 +305,7 @@ def detect(save_img=False):
     webcam = source == '0' or source.startswith('rtsp') or source.startswith('http') or source.endswith('.txt')
 
     # Initialize
-    device = torch_utils.select_device(device=device_)
+    device = torch_utils.select_device(device=opt.device)
     if os.path.exists(out):
         shutil.rmtree(out)  # delete output folder
     os.makedirs(out)  # make new output folder
@@ -453,6 +453,7 @@ if __name__ == '__main__':
     parser.add_argument('--conf-thres', type=float, default=0.3, help='object confidence threshold')
     parser.add_argument('--iou-thres', type=float, default=0.6, help='IOU threshold for NMS')
     parser.add_argument('--agnostic-nms', action='store_true', help='class-agnostic NMS')
+    parser.add_argument('--device', default='', help='device id (i.e. 0 or 0,1) or cpu')
     opt = parser.parse_args()
 
     app.run(main)
