@@ -288,22 +288,18 @@ def detect(save_img=False):
     out = 'output'
     source = 'semioutput'
     weights = 'weights/yolov3-spp-ultralytics.pt'
-    half = 'store_true'
-    view_img = 'store_true'
-    save_txt = 'store_true'
-    #device_ = ''
     cfg_ = 'cfg/yolov3-spp.cfg'
     names_ = 'data/coco.names'
-    augment_ = 'store_true'
-    #agnostic_nms = 'store_true'
     fourcc = 'mp4'
-    #classes_ = ''
+    half = opt.half
+    view_img = opt.view_img
+    save_txt = opt.save_txt
 
     imgsz = img_size
     webcam = source == '0' or source.startswith('rtsp') or source.startswith('http') or source.endswith('.txt')
 
     # Initialize
-    device = torch_utils.select_device(device=opt.device)
+    device = torch_utils.select_device(device='cpu' if ONNX_EXPORT else opt.device)
     if os.path.exists(out):
         shutil.rmtree(out)  # delete output folder
     os.makedirs(out)  # make new output folder
@@ -330,6 +326,21 @@ def detect(save_img=False):
 
     # Fuse Conv2d + BatchNorm2d layers
     # model.fuse()
+
+    # Export mode
+    if ONNX_EXPORT:
+        model.fuse()
+        img = torch.zeros((1, 3) + imgsz)  # (1, 3, 320, 192)
+        f = weights.replace(weights.split('.')[-1], 'onnx')  # *.onnx filename
+        torch.onnx.export(model, img, f, verbose=False, opset_version=11,
+                          input_names=['images'], output_names=['classes', 'boxes'])
+
+        # Validate exported model
+        import onnx
+        model = onnx.load(f)  # Load the ONNX model
+        onnx.checker.check_model(model)  # Check that the IR is well formed
+        print(onnx.helper.printable_graph(model.graph))  # Print a human readable representation of the graph
+        return
 
     # Half precision
     half = half and device.type != 'cpu'  # half precision only supported on CUDA
@@ -363,7 +374,7 @@ def detect(save_img=False):
 
         # Inference
         t1 = torch_utils.time_synchronized()
-        pred = model(img, augment=augment_)[0]
+        pred = model(img, augment=opt.augment)[0]
         t2 = torch_utils.time_synchronized()
 
         # to float
@@ -393,7 +404,7 @@ def detect(save_img=False):
                 det[:, :4] = scale_coords(img.shape[2:], det[:, :4], im0.shape).round()
 
                 # Print results
-                for c in det[:, -1].unique():
+                for c in det[:, -1].detach().unique():
                     n = (det[:, -1] == c).sum()  # detections per class
                     s += '%g %ss, ' % (n, names[int(c)])  # add to string
 
@@ -440,7 +451,6 @@ def detect(save_img=False):
 
     print('Done. (%.3fs)' % (time.time() - t0))
 
-
 def main(_):
   _run_inference()
   detect()
@@ -452,6 +462,10 @@ if __name__ == '__main__':
     parser.add_argument('--iou-thres', type=float, default=0.6, help='IOU threshold for NMS')
     parser.add_argument('--agnostic-nms', action='store_true', help='class-agnostic NMS')
     parser.add_argument('--device', default='', help='device id (i.e. 0 or 0,1) or cpu')
+    parser.add_argument('--augment', action='store_true', help='augmented inference')
+    parser.add_argument('--half', action='store_true', help='half precision FP16 inference')
+    parser.add_argument('--view-img', action='store_true', help='display results')
+    parser.add_argument('--save-txt', action='store_true', help='save results to *.txt')
     opt = parser.parse_args()
 
     app.run(main)
