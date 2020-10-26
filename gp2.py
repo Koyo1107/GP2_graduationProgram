@@ -9,6 +9,7 @@ import fnmatch
 import tensorflow as tf
 import nets
 import util
+import cv2
 
 gfile = tf.gfile
 
@@ -32,6 +33,12 @@ INFERENCE_CROP_CITYSCAPES = 'cityscapes'
 input_dir = 'input'
 output_dir = 'semioutput'
 model_ckpt = 'model/KITTI/model-199160'
+#inputsource = []
+x1 = 0
+x2 = 0
+y1 = 0
+y2 = 0
+
 
 def _run_inference(output_dir=output_dir,
                    file_extension='png',
@@ -116,8 +123,7 @@ def _run_inference(output_dir=output_dir,
             im_batch = np.flip(im_batch, axis=2)
 
           for j in range(len(im_batch)):
-            color_map = util.normalize_depth_for_display(
-                np.squeeze(est_depth[j]))
+            color_map = util.normalize_depth_for_display(np.squeeze(est_depth[j]))
             visualization = np.concatenate((im_batch[j], color_map), axis=0)
             # Save raw prediction and color visualization. Extract filename
             # without extension from full path: e.g. path/to/input_dir/folder1/
@@ -130,6 +136,9 @@ def _run_inference(output_dir=output_dir,
             #with gfile.Open(output_raw, 'wb') as f:
             #  np.save(f, est_depth[j])
             util.save_image(output_vis, visualization, file_extension)
+          #inputsource = im_batch
+          #print ('Print here im_batch test')
+          #print (len(im_batch))
           im_batch = []
 
     # Run egomotion network.
@@ -281,8 +290,27 @@ def _recursive_glob(treeroot, pattern):
   return results
 
 #----------------------------------------------------------------------------------------------------------------------
-#yolov3
+#write bbox on depth trying
+def plot_bbox_and_depth(x, img, color=None, label=None, line_thickness=None):
+    # Plots one bounding box on image img
+    tl = line_thickness or round(0.002 * (img.shape[0] + img.shape[1]) / 2) + 1  # line/font thickness
+    color = color or [random.randint(0, 255) for _ in range(3)]
+    c1, c2 = (int(x[0]), int(x[1])), (int(x[2]), int(x[3]))
+    cv2.rectangle(img, c1, c2, color, thickness=tl, lineType=cv2.LINE_AA)
+    if label:
+        tf = max(tl - 1, 1)  # font thickness
+        t_size = cv2.getTextSize(label, 0, fontScale=tl / 3, thickness=tf)[0]
+        c2 = c1[0] + t_size[0], c1[1] - t_size[1] - 3
+        cv2.rectangle(img, c1, c2, color, -1, cv2.LINE_AA)  # filled
+        cv2.putText(img, label, (c1[0], c1[1] - 2), 0, tl / 3, [225, 255, 255], thickness=tf, lineType=cv2.LINE_AA)
+    harf_ymax = int(img.shape[0] / 2)
+    k1, k2 = (int(x[0]), int(x[1]) + harf_ymax), (int(x[2]), int(x[3]) + harf_ymax)
+    print('k1 and k2 wite test here')
+    print(k1, k2)
+    cv2.rectangle(img, k1, k2, color, thickness=tl, lineType=cv2.LINE_AA)
+    print('wote on the depth')
 
+#yolov3
 def detect(save_img=False): 
     img_size = 512 
     out = 'output'
@@ -400,7 +428,7 @@ def detect(save_img=False):
 
                     if save_img or view_img:  # Add bbox to image
                         label = '%s %.2f' % (names[int(cls)], conf)
-                        plot_one_box(xyxy, im0, label=label, color=colors[int(cls)])
+                        plot_bbox_and_depth(xyxy, im0, label=label, color=colors[int(cls)])
 
             # Print time (inference + NMS)
             print('%sDone. (%.3fs)' % (s, t2 - t1))
