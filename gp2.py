@@ -33,12 +33,6 @@ INFERENCE_CROP_CITYSCAPES = 'cityscapes'
 input_dir = 'input'
 output_dir = 'semioutput'
 model_ckpt = 'model/KITTI/model-199160'
-#inputsource = []
-x1 = 0
-x2 = 0
-y1 = 0
-y2 = 0
-
 
 def _run_inference(output_dir=output_dir,
                    file_extension='png',
@@ -290,6 +284,45 @@ def _recursive_glob(treeroot, pattern):
   return results
 
 #----------------------------------------------------------------------------------------------------------------------
+#get bbox and color data
+
+color_data = []
+
+#from https://qiita.com/yasudadesu/items/dd3e74dcc7e8f72bc680
+def drow_texts(img, x, y, texts, font_scale, color, thickness):
+    initial_y = 0
+    dy = int (img.shape[0] / 20)
+
+    texts = [texts] if type(texts) == str else texts
+
+    for i, text in enumerate(texts):
+        offset_y = y + (i+1)*dy
+        cv2.putText(img, text, (x, offset_y), cv2.FONT_HERSHEY_SIMPLEX, font_scale, color, thickness, cv2.LINE_AA)
+
+
+def color_detection(img, xy, color=None):
+    harf_height = int(img.shape[0] / 2)
+    #get box area
+    boxFromX = int(xy[0])
+    boxFromY = int(xy[1] + harf_height)
+    boxToX = int(xy[2])
+    boxToY = int(xy[3] + harf_height)
+
+    #get box
+    imgBox = img[boxFromY: boxToY, boxFromX:boxToX]
+
+    #flatten and out RGB mean
+    b = int(imgBox.T[0].flatten().mean())
+    g = int(imgBox.T[1].flatten().mean())
+    r = int(imgBox.T[2].flatten().mean())
+
+    #wite color data on the depth
+    color = color or [random.randint(0, 255) for _ in range(3)]
+    tl = round(0.002 * (img.shape[0] + img.shape[1]) / 2) 
+    text = ["B: %.2f" % (b), "G: %.2f" % (g), "R: %.2f" % (r)]
+    drow_texts(img, boxFromX, boxFromY, text, 0.3, color, tl)
+
+#----------------------------------------------------------------------------------------------------------------------
 #write bbox on depth trying
 def plot_bbox_and_depth(x, img, color=None, label=None, line_thickness=None):
     # Plots one bounding box on image img
@@ -305,8 +338,6 @@ def plot_bbox_and_depth(x, img, color=None, label=None, line_thickness=None):
         cv2.putText(img, label, (c1[0], c1[1] - 2), 0, tl / 3, [225, 255, 255], thickness=tf, lineType=cv2.LINE_AA)
     harf_ymax = int(img.shape[0] / 2)
     k1, k2 = (int(x[0]), int(x[1]) + harf_ymax), (int(x[2]), int(x[3]) + harf_ymax)
-    print('k1 and k2 wite test here')
-    print(k1, k2)
     cv2.rectangle(img, k1, k2, color, thickness=tl, lineType=cv2.LINE_AA)
     print('wote on the depth')
 
@@ -429,6 +460,8 @@ def detect(save_img=False):
                     if save_img or view_img:  # Add bbox to image
                         label = '%s %.2f' % (names[int(cls)], conf)
                         plot_bbox_and_depth(xyxy, im0, label=label, color=colors[int(cls)])
+                        color_detection(im0, xyxy, color=colors[int(cls)])
+
 
             # Print time (inference + NMS)
             print('%sDone. (%.3fs)' % (s, t2 - t1))
@@ -463,7 +496,7 @@ def detect(save_img=False):
     print('Done. (%.3fs)' % (time.time() - t0))
 
 def main(_):
-  _run_inference()
+  #_run_inference()
   detect()
 
 if __name__ == '__main__':
