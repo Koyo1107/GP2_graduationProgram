@@ -496,7 +496,7 @@ def detect(save_img=False):
     print('Done. (%.3fs)' % (time.time() - t0))
 
 def main(_):
-  #_run_inference()
+  _run_inference()
   detect()
 
 if __name__ == '__main__':
