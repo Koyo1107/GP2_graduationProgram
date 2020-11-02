@@ -21,7 +21,7 @@ INFERENCE_MODE_TRIPLETS = 'triplets'  # Take image triplets as input.
 INFERENCE_CROP_NONE = 'none'
 INFERENCE_CROP_CITYSCAPES = 'cityscapes'
 
-input_dir = 'input'
+input_dir = 'input_video'
 output_dir = 'semioutput'
 model_ckpt = 'model/KITTI/model-199160'
 
@@ -253,7 +253,6 @@ def _run_inference(output_dir=output_dir,
           with gfile.Open(output_filepath, file_mode) as current_output_handle:
             current_output_handle.write(str(i) + ' ' + egomotion_1_2 + ' ' + egomotion_2_3 + '\n')
           written_before.append(output_filepath)
-       logging.info('Struct2Depth Done.')
 
 
 #------------------------------------------YOLO v3----------------------------------------
@@ -468,3 +467,11 @@ def detect(save_img=False):
             os.system('open ' + save_path)
 
     print('YOLO v3 Done. (%.3fs)' % (time.time() - t0))
+
+#----------------------------------------------Application --------------------------------------
+
+def main(_):
+  _run_inference()
+
+if __name__ == '__main__':
+  app.run(main)
