@@ -9,6 +9,7 @@ import fnmatch
 import tensorflow as tf
 import nets
 import util
+import cv2
 
 gfile = tf.gfile
 
@@ -86,9 +87,9 @@ def _recursive_glob(treeroot, pattern):
 #---------------------------------struct depth main function---------------------------------
 
 def _run_inference(output_dir=output_dir,
-                   file_extension='png',
+                   file_extension='mp4',
                    depth=True,
-                   egomotion=True,
+                   egomotion=False,
                    model_ckpt=model_ckpt,
                    input_dir=input_dir,
                    input_list_file=None,
@@ -125,134 +126,153 @@ def _run_inference(output_dir=output_dir,
     logging.info('Predictions will be saved in %s.', output_dir)
 
     # Collect all images to run inference on.
-    im_files, basepath_in = collect_input_images(input_dir, input_list_file,file_extension)
-    if shuffle:
-      logging.info('Shuffling data...')
-      np.random.shuffle(im_files)
-    logging.info('Running inference on %d files.', len(im_files))
+    #im_files, basepath_in = collect_input_images(input_dir, input_list_file,file_extension)
+    #if shuffle:
+    #  logging.info('Shuffling data...')
+    #  np.random.shuffle(im_files)
+    #logging.info('Running inference on %d files.', len(im_files))
 
     # Create missing output folders and pre-compute target directories.
-    output_dirs = create_output_dirs(im_files, basepath_in, output_dir)
+    #output_dirs = create_output_dirs(im_files, basepath_in, output_dir)
 
-    # Run depth prediction network.
-    if depth:
-      im_batch = []
-      for i in range(len(im_files)):
-        if i % 100 == 0:
-          logging.info('%s of %s files processed.', i, len(im_files))
+    #--------------------------------------------------------------
+    #Here to use while by koyo
+    vid = cv2.VideoCapture('input_video/short_traffic_demo.mp4')
+    vid_width = int(vid.get(cv2.CAP_PROP_FRAME_WIDTH))
+    vid_height = int(vid.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    vid_size = (vid_width, vid_height)
+    vid_frame = int(vid.get(cv2.CAP_PROP_FPS))
+    
+    fmt = cv2.VideoWriter_fourcc('m','p','4','v')
+    writer = cv2.VideoWriter('test_output/test.mp4', fmt, vid_frame, vid_size)
 
-        # Read image and run inference.
-        if inference_mode == INFERENCE_MODE_SINGLE:
-          if inference_crop == INFERENCE_CROP_NONE:
-            im = util.load_image(im_files[i], resize=(img_width, img_height))
-          elif inference_crop == INFERENCE_CROP_CITYSCAPES:
-            im = util.crop_cityscapes(util.load_image(im_files[i]),resize=(img_width, img_height))
-        elif inference_mode == INFERENCE_MODE_TRIPLETS:
-          im = util.load_image(im_files[i], resize=(img_width * 3, img_height))
-          im = im[:, img_width:img_width*2]
-        if flip_for_depth:
-          im = np.flip(im, axis=1)
-        im_batch.append(im)
+    while(vid.isOpened()):
+        ret, frame = vid.read()
+        
+        frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        # Run depth prediction network.
+        if depth:
+            im_batch = []
+            for i in range(len(frame)):
+                if i % 100 == 0:
+                    logging.info('%s of %s files processed.', i, len(frame))
 
-        if len(im_batch) == batch_size or i == len(im_files) - 1:
-          # Call inference on batch.
-          for _ in range(batch_size - len(im_batch)):  # Fill up batch.
-            im_batch.append(np.zeros(shape=(img_height, img_width, 3),dtype=np.float32))
-          im_batch = np.stack(im_batch, axis=0)
-          est_depth = inference_model.inference_depth(im_batch, sess)
-          if flip_for_depth:
-            est_depth = np.flip(est_depth, axis=2)
-            im_batch = np.flip(im_batch, axis=2)
+                # Read image and run inference.
+                if inference_mode == INFERENCE_MODE_SINGLE:
+                    if inference_crop == INFERENCE_CROP_NONE:
+                        im = util.load_image(frame[i], resize=(img_width, img_height))
+                    elif inference_crop == INFERENCE_CROP_CITYSCAPES:
+                        im = util.crop_cityscapes(util.load_image(frame[i]),resize=(img_width, img_height))
+                elif inference_mode == INFERENCE_MODE_TRIPLETS:
+                    im = util.load_image(frame[i], resize=(img_width * 3, img_height))
+                    im = im[:, img_width:img_width*2]
+                if flip_for_depth:
+                    im = np.flip(im, axis=1)
+                im_batch.append(im)
 
-          for j in range(len(im_batch)):
-            color_map = util.normalize_depth_for_display(np.squeeze(est_depth[j]))
-            visualization = np.concatenate((im_batch[j], color_map), axis=0)
-            # Save raw prediction and color visualization. Extract filename
-            # without extension from full path: e.g. path/to/input_dir/folder1/
-            # file1.png -> file1
-            k = i - len(im_batch) + 1 + j
-            filename_root = os.path.splitext(os.path.basename(im_files[k]))[0]
-            pref = '_flip' if flip_for_depth else ''
-            #output_raw = os.path.join(output_dirs[k], filename_root + pref + '.npy')
-            output_vis = os.path.join(output_dirs[k], filename_root + pref + '.png')
-            #with gfile.Open(output_raw, 'wb') as f:
-            #  np.save(f, est_depth[j])
-            util.save_image(output_vis, visualization, file_extension)
-          #inputsource = im_batch
-          #print ('Print here im_batch test')
-          #print (len(im_batch))
-          im_batch = []
+                if len(im_batch) == batch_size or i == len(frame) - 1:
+                # Call inference on batch.
+                    for _ in range(batch_size - len(im_batch)):  # Fill up batch.
+                        im_batch.append(np.zeros(shape=(img_height, img_width, 3),dtype=np.float32))
+                    im_batch = np.stack(im_batch, axis=0)
+                    est_depth = inference_model.inference_depth(im_batch, sess)
+                    if flip_for_depth:
+                        est_depth = np.flip(est_depth, axis=2)
+                        im_batch = np.flip(im_batch, axis=2)
 
-    # Run egomotion network.
-    if egomotion:
-      if inference_mode == INFERENCE_MODE_SINGLE:
-        # Run regular egomotion inference loop.
-        input_image_seq = []
-        input_seg_seq = []
-        current_sequence_dir = None
-        current_output_handle = None
-        for i in range(len(im_files)):
-          sequence_dir = os.path.dirname(im_files[i])
-          if sequence_dir != current_sequence_dir:
-            # Assume start of a new sequence, since this image lies in a
-            # different directory than the previous ones.
-            # Clear egomotion input buffer.
-            output_filepath = os.path.join(output_dirs[i], 'egomotion.txt')
-            if current_output_handle is not None:
-              current_output_handle.close()
-            current_sequence_dir = sequence_dir
-            logging.info('Writing egomotion sequence to %s.', output_filepath)
-            current_output_handle = gfile.Open(output_filepath, 'w')
-            input_image_seq = []
-          im = util.load_image(im_files[i], resize=(img_width, img_height))
-          input_image_seq.append(im)
-          if use_masks:
-            im_seg_path = im_files[i].replace('.%s' % file_extension, '-seg.%s' % file_extension)
-            if not gfile.Exists(im_seg_path):
-              raise ValueError('No segmentation mask has been found for image. If none are available, disable use_masks.' % (im_seg_path, im_files[i]))
-            input_seg_seq.append(util.load_image(im_seg_path, resize=(img_width, img_height), interpolation='nn'))
+                for j in range(len(im_batch)):
+                    color_map = util.normalize_depth_for_display(np.squeeze(est_depth[j]))
+                    visualization = np.concatenate((im_batch[j], color_map), axis=0)
+                    writer.write(visualization)
+                    # Save raw prediction and color visualization. Extract filename
+                    # without extension from full path: e.g. path/to/input_dir/folder1/
+                    # file1.png -> file1
+                    #k = i - len(im_batch) + 1 + j
+                    #filename_root = os.path.splitext(os.path.basename(frame[k]))[0]
+                    #pref = '_flip' if flip_for_depth else ''
+                    #output_raw = os.path.join(output_dirs[k], filename_root + pref + '.npy')
+                    #output_vis = os.path.join(output_dirs[k], filename_root + pref + '.png')
+                    #with gfile.Open(output_raw, 'wb') as f:
+                    #  np.save(f, est_depth[j])
+                    #util.save_image(output_vis, visualization, file_extension)
+                #inputsource = im_batch
+                #print ('Print here im_batch test')
+                #print (len(im_batch))
+                im_batch = []
+                writer.release()
+        
 
-          if len(input_image_seq) < seq_length:  # Buffer not filled yet.
-            continue
-          if len(input_image_seq) > seq_length:  # Remove oldest entry.
-            del input_image_seq[0]
-            if use_masks:
-              del input_seg_seq[0]
+        # Run egomotion network.
+        if egomotion:
+            if inference_mode == INFERENCE_MODE_SINGLE:
+                # Run regular egomotion inference loop.
+                input_image_seq = []
+                input_seg_seq = []
+                current_sequence_dir = None
+                current_output_handle = None
+                for i in range(len(frame)):
+                    sequence_dir = os.path.dirname(frame[i])
+                    if sequence_dir != current_sequence_dir:
+                        # Assume start of a new sequence, since this image lies in a
+                        # different directory than the previous ones.
+                        # Clear egomotion input buffer.
+                        output_filepath = os.path.join(output_dirs[i], 'egomotion.txt')
+                        if current_output_handle is not None:
+                            current_output_handle.close()
+                        current_sequence_dir = sequence_dir
+                        logging.info('Writing egomotion sequence to %s.', output_filepath)
+                        current_output_handle = gfile.Open(output_filepath, 'w')
+                        input_image_seq = []
+                    im = util.load_image(frame[i], resize=(img_width, img_height))
+                    input_image_seq.append(im)
+                    if use_masks:
+                        im_seg_path = frame[i].replace('.%s' % file_extension, '-seg.%s' % file_extension)
+                        if not gfile.Exists(im_seg_path):
+                            raise ValueError('No segmentation mask has been found for image. If none are available, disable use_masks.' % (im_seg_path, frame[i]))
+                        input_seg_seq.append(util.load_image(im_seg_path, resize=(img_width, img_height), interpolation='nn'))
 
-          input_image_stack = np.concatenate(input_image_seq, axis=2)
-          input_image_stack = np.expand_dims(input_image_stack, axis=0)
-          if use_masks:
-            input_image_stack = mask_image_stack(input_image_stack, input_seg_seq)
-          est_egomotion = np.squeeze(inference_model.inference_egomotion(input_image_stack, sess))
-          egomotion_str = []
-          for j in range(seq_length - 1):
-            egomotion_str.append(','.join([str(d) for d in est_egomotion[j]]))
-          current_output_handle.write( str(i) + ' ' + ' '.join(egomotion_str) + '\n')
-        if current_output_handle is not None:
-          current_output_handle.close()
-      elif inference_mode == INFERENCE_MODE_TRIPLETS:
-        written_before = []
-        for i in range(len(im_files)):
-          im = util.load_image(im_files[i], resize=(img_width * 3, img_height))
-          input_image_stack = np.concatenate([im[:, :img_width], im[:, img_width:img_width*2],im[:, img_width*2:]], axis=2)
-          input_image_stack = np.expand_dims(input_image_stack, axis=0)
-          if use_masks:
-            im_seg_path = im_files[i].replace('.%s' % file_extension,'-seg.%s' % file_extension)
-            if not gfile.Exists(im_seg_path):
-              raise ValueError('No segmentation mask %s has been found for image %s. If none are available, disable use_masks.' % (im_seg_path, im_files[i]))
-            seg = util.load_image(im_seg_path, resize=(img_width * 3, img_height), interpolation='nn')
-            input_seg_seq = [seg[:, :img_width], seg[:, img_width:img_width*2], seg[:, img_width*2:]]
-            input_image_stack = mask_image_stack(input_image_stack, input_seg_seq)
-          est_egomotion = inference_model.inference_egomotion(input_image_stack, sess)
-          est_egomotion = np.squeeze(est_egomotion)
-          egomotion_1_2 = ','.join([str(d) for d in est_egomotion[0]])
-          egomotion_2_3 = ','.join([str(d) for d in est_egomotion[1]])
+                    if len(input_image_seq) < seq_length:  # Buffer not filled yet.
+                        continue
+                    if len(input_image_seq) > seq_length:  # Remove oldest entry.
+                        del input_image_seq[0]
+                        if use_masks:
+                            del input_seg_seq[0]
 
-          output_filepath = os.path.join(output_dirs[i], 'egomotion.txt')
-          file_mode = 'w' if output_filepath not in written_before else 'a'
-          with gfile.Open(output_filepath, file_mode) as current_output_handle:
-            current_output_handle.write(str(i) + ' ' + egomotion_1_2 + ' ' + egomotion_2_3 + '\n')
-          written_before.append(output_filepath)
+                    input_image_stack = np.concatenate(input_image_seq, axis=2)
+                    input_image_stack = np.expand_dims(input_image_stack, axis=0)
+                    if use_masks:
+                        input_image_stack = mask_image_stack(input_image_stack, input_seg_seq)
+                    est_egomotion = np.squeeze(inference_model.inference_egomotion(input_image_stack, sess))
+                    egomotion_str = []
+                    for j in range(seq_length - 1):
+                        egomotion_str.append(','.join([str(d) for d in est_egomotion[j]]))
+                    current_output_handle.write( str(i) + ' ' + ' '.join(egomotion_str) + '\n')
+                if current_output_handle is not None:
+                    current_output_handle.close()
+            elif inference_mode == INFERENCE_MODE_TRIPLETS:
+                written_before = []
+                for i in range(len(frame)):
+                    im = util.load_image(frame[i], resize=(img_width * 3, img_height))
+                    input_image_stack = np.concatenate([im[:, :img_width], im[:, img_width:img_width*2],im[:, img_width*2:]], axis=2)
+                    input_image_stack = np.expand_dims(input_image_stack, axis=0)
+                    if use_masks:
+                        im_seg_path = frame[i].replace('.%s' % file_extension,'-seg.%s' % file_extension)
+                        if not gfile.Exists(im_seg_path):
+                            raise ValueError('No segmentation mask %s has been found for image %s. If none are available, disable use_masks.' % (im_seg_path, frame[i]))
+                        seg = util.load_image(im_seg_path, resize=(img_width * 3, img_height), interpolation='nn')
+                        input_seg_seq = [seg[:, :img_width], seg[:, img_width:img_width*2], seg[:, img_width*2:]]
+                        input_image_stack = mask_image_stack(input_image_stack, input_seg_seq)
+                    est_egomotion = inference_model.inference_egomotion(input_image_stack, sess)
+                    est_egomotion = np.squeeze(est_egomotion)
+                    egomotion_1_2 = ','.join([str(d) for d in est_egomotion[0]])
+                    egomotion_2_3 = ','.join([str(d) for d in est_egomotion[1]])
+
+                    output_filepath = os.path.join(output_dirs[i], 'egomotion.txt')
+                    file_mode = 'w' if output_filepath not in written_before else 'a'
+                    with gfile.Open(output_filepath, file_mode) as current_output_handle:
+                        current_output_handle.write(str(i) + ' ' + egomotion_1_2 + ' ' + egomotion_2_3 + '\n')
+                    written_before.append(output_filepath)
+
 
 
 #------------------------------------------YOLO v3----------------------------------------
