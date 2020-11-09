@@ -96,7 +96,7 @@ def _run_inference(output_dir=output_dir,
     video_capture = cv2.VideoCapture(video_data)
     fourcc = cv2.VideoWriter_fourcc('m', 'p', '4', 'v')
     fps = int(video_capture.get(cv2.CAP_PROP_FPS))
-    out = cv2.VideoWriter(output_dir + '/' + 'try_1106.mp4', fourcc, fps, (img_width, img_height))
+    out = cv2.VideoWriter(output_dir + '/' + 'try_1109.mp4', fourcc, fps, (416, 256))
     frame_count = (int(video_capture.get(cv2.CAP_PROP_FRAME_COUNT)))
 
     while True:
@@ -112,20 +112,21 @@ def _run_inference(output_dir=output_dir,
 
           im = cv2.cvtColor(im, cv2.COLOR_BGR2RGB)
           #VGAの画像を切り出して416x128に合わせる
-          ymin, ymax, xmin, xmax = [142, 339, 0, 640]
-          im = im[ymin:ymax, xmin:xmax]
+          #ymin, ymax, xmin, xmax = [142, 339, 0, 640]
+          #im = im[ymin:ymax, xmin:xmax]
           im = cv2.resize(im, (img_width, img_height))
           im = np.array(im, dtype=np.float32) / 255.0
 
           im_batch.append(im)
+          for _ in range(batch_size - len(im_batch)):  # Fill up batch.
+            im_batch.append(np.zeros(shape=(img_height, img_width, 3), dtype=np.float32))
 
-          #for _ in range(batch_size - len(im_batch)):  # Fill up batch.
-          #    im_batch.append(np.zeros(shape=(img_height, img_width, 3),dtype=np.float32))
           im_batch = np.stack(im_batch, axis=0)
           est_depth = inference_model.inference_depth(im_batch, sess)
-          color_map = util.normalize_depth_for_display(np.squeeze(est_depth))
           
-          image_frame = np.concatenate((im, color_map), axis=0)
+          color_map = util.normalize_depth_for_display(np.squeeze(est_depth))
+          #color_map = (color_map * 255.0).astype(np.uint8)
+          image_frame = np.concatenate((im_batch[0], color_map), axis=0)
           image_frame = (image_frame * 255.0).astype(np.uint8)
           image_frame = cv2.cvtColor(image_frame, cv2.COLOR_RGB2BGR)
 
