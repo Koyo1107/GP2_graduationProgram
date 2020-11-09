@@ -133,6 +133,53 @@ def _run_inference(output_dir=output_dir,
           out.write(image_frame)
           im_batch = []
 
+"""       if egomotion:exi
+        if inference_mode == INFERENCE_MODE_SINGLE:
+          # Run regular egomotion inference loop.
+          input_image_seq = []
+          input_seg_seq = []
+          current_sequence_dir = None
+          current_output_handle = None
+          for i in range(len(im_files)):
+            sequence_dir = os.path.dirname(im_files[i])
+            if sequence_dir != current_sequence_dir:
+              # Assume start of a new sequence, since this image lies in a
+              # different directory than the previous ones.
+              # Clear egomotion input buffer.
+              output_filepath = os.path.join(output_dirs[i], 'egomotion.txt')
+              if current_output_handle is not None:
+                current_output_handle.close()
+              current_sequence_dir = sequence_dir
+              logging.info('Writing egomotion sequence to %s.', output_filepath)
+              current_output_handle = gfile.Open(output_filepath, 'w')
+              input_image_seq = []
+            im = util.load_image(im_files[i], resize=(img_width, img_height))
+            input_image_seq.append(im)
+            if use_masks:
+              im_seg_path = im_files[i].replace('.%s' % file_extension, '-seg.%s' % file_extension)
+              if not gfile.Exists(im_seg_path):
+                raise ValueError('No segmentation mask %s has been found for image %s. If none are available, disable use_masks.' % (im_seg_path, im_files[i]))
+              input_seg_seq.append(util.load_image(im_seg_path, resize=(img_width, img_height), interpolation='nn'))
+
+            if len(input_image_seq) < seq_length:  # Buffer not filled yet.
+              continue
+            if len(input_image_seq) > seq_length:  # Remove oldest entry.
+              del input_image_seq[0]
+              if use_masks:
+                del input_seg_seq[0]
+
+            input_image_stack = np.concatenate(input_image_seq, axis=2)
+            input_image_stack = np.expand_dims(input_image_stack, axis=0)
+            if use_masks:
+              input_image_stack = mask_image_stack(input_image_stack, input_seg_seq)
+            est_egomotion = np.squeeze(inference_model.inference_egomotion(input_image_stack, sess))
+            egomotion_str = []
+            for j in range(seq_length - 1):
+              egomotion_str.append(','.join([str(d) for d in est_egomotion[j]]))
+            current_output_handle.write(str(i) + ' ' + ' '.join(egomotion_str) + '\n')
+          if current_output_handle is not None:
+            current_output_handle.close() """
+
     logging.info('Done.')
     video_capture.release()
     out.release()
