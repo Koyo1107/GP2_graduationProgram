@@ -14,11 +14,21 @@ import cv2
 gfile = tf.gfile
 
 #yolo from here-----
-import torch
 import argparse
-from utils.datasets import *
-from utils.utils import *
-from models import *
+import time
+from pathlib import Path
+
+import cv2
+import torch
+import torch.backends.cudnn as cudnn
+from numpy import random
+
+from models.experimental import attempt_load
+from utils.datasets import LoadStreams, LoadImages
+from utils.general import check_img_size, non_max_suppression, apply_classifier, scale_coords, xyxy2xywh, \
+    strip_optimizer, set_logging, increment_path
+from utils.plots import plot_one_box
+from utils.torch_utils import select_device, load_classifier, time_synchronized
 #------------------
 
 #----------------------------------------------------------------------------------------------------------------------
@@ -61,7 +71,7 @@ def color_detection(img, xy, color=None):
     text = ["B: %.2f" % (b), "G: %.2f" % (g), "R: %.2f" % (r)]
     drow_texts(img, boxFromX, boxFromY, text, 0.3, color, tl)
 
-#----------------------------------------------------------------------------------------------------------------------
+
 #write bbox on depth trying
 def plot_bbox_and_depth(x, img, color=None, label=None, line_thickness=None):
     # Plots one bounding box on image img
@@ -79,111 +89,85 @@ def plot_bbox_and_depth(x, img, color=None, label=None, line_thickness=None):
     k1, k2 = (int(x[0]), int(x[1]) + harf_ymax), (int(x[2]), int(x[3]) + harf_ymax)
     cv2.rectangle(img, k1, k2, color, thickness=tl, lineType=cv2.LINE_AA)
 
-#yolov3
-def detect(get_img, save_img=False): 
-    img_size = 512 
-    weights = 'weights/yolov3-spp-ultralytics.pt'
-    cfg_ = 'cfg/yolov3-spp.cfg'
-    names_ = 'data/coco.names'
-    fourcc = 'mp4'
-    half = opt.half
-    view_img = opt.view_img
-    save_txt = opt.save_txt
+#--------------------------------------yolo main--------------------------------------------
 
-    imgsz = img_size
+def detect(source, save_img=False):
+  weights = opt.weights
+  view_img = opt.view_img
+  imgsz = 640
 
-    # Initialize
-    device = torch_utils.select_device(device='cpu' if ONNX_EXPORT else opt.device)
+  # Directories
+  #save_dir = Path(increment_path(Path(opt.project) / opt.name, exist_ok=opt.exist_ok))  # increment run
+  #(save_dir / 'labels' if save_txt else save_dir).mkdir(parents=True, exist_ok=True)  # make dir
 
-    # Initialize model
-    model = Darknet(cfg_, imgsz)
+  # Initialize
+  set_logging()
+  device = select_device(opt.device)
+  half = device.type != 'cpu'  # half precision only supported on CUDA
 
-    # Load weights
-    attempt_download(weights)
-    if weights.endswith('.pt'):  # pytorch format
-        model.load_state_dict(torch.load(weights, map_location=device)['model'])
-    else:  # darknet format
-        load_darknet_weights(model, weights)
+  # Load model
+  model = attempt_load(weights, map_location=device)  # load FP32 model
+  imgsz = check_img_size(imgsz, s=model.stride.max())  # check img_size
+  if half:
+      model.half()  # to FP16
 
-    # Second-stage classifier
-    classify = False
-    if classify:
-        modelc = torch_utils.load_classifier(name='resnet101', n=2)  # initialize
-        modelc.load_state_dict(torch.load('weights/resnet101.pt', map_location=device)['model'])  # load weights
-        modelc.to(device).eval()
+  # Second-stage classifier
+  classify = False
+  if classify:
+      modelc = load_classifier(name='resnet101', n=2)  # initialize
+      modelc.load_state_dict(torch.load('weights/resnet101.pt', map_location=device)['model']).to(device).eval()
 
-    # Eval mode
-    model.to(device).eval()
+  # Set Dataloader
+  #vid_path, vid_writer = None, None
+  #dataset = LoadStreams(source, img_size=imgsz)
 
-    # Fuse Conv2d + BatchNorm2d layers
-    # model.fuse()
-    half = half and device.type != 'cpu'  # half precision only supported on CUDA
-    if half:
-        model.half()
+  # Get names and colors
+  names = model.module.names if hasattr(model, 'module') else model.names
+  colors = [[random.randint(0, 255) for _ in range(3)] for _ in names]
 
-    vid_path, vid_writer = None, None
-    save_img = True
+  # Run inference
+  img = torch.zeros((1, 3, imgsz, imgsz), device=device)  # init img
+  _ = model(img.half() if half else img) if device.type != 'cpu' else None  # run once
+  img = torch.from_numpy(source).to(device)
+  img = img.half() if half else img.float()  # uint8 to fp16/32
+  img /= 255.0  # 0 - 255 to 0.0 - 1.0
+  if img.ndimension() == 3:
+      img = img.unsqueeze(0)
 
-    # Get names and colors
-    names = load_classes(names_)
-    colors = [[random.randint(0, 255) for _ in range(3)] for _ in range(len(names))]
+  # Inference
+  pred = model(img, augment=opt.augment)[0]
 
-    # Run inference
+  # Apply NMS
+  pred = non_max_suppression(pred, opt.conf_thres, opt.iou_thres, classes=opt.classes, agnostic=opt.agnostic_nms)
 
-    img = torch.zeros((1, 3, imgsz, imgsz), device=device)  # init img
-    _ = model(img.half() if half else img.float()) if device.type != 'cpu' else None  # run once
-    path = get_img
-    img = get_img
-    im0s = get_img
-    img = torch.from_numpy(img).to(device)
-    img = img.half() if half else img.float()  # uint8 to fp16/32
-    img /= 255.0  # 0 - 255 to 0.0 - 1.0
-    if img.ndimension() == 3:
-        img = img.unsqueeze(0)
+  # Apply Classifier
+  if classify:
+    pred = apply_classifier(pred, modelc, img, im0s)
 
-    # Inference
-    t1 = torch_utils.time_synchronized()
-    pred = model(img, augment=opt.augment)[0]
-    t2 = torch_utils.time_synchronized()
+  # Process detections
+  for i, det in enumerate(pred):  # detections per image
+    p, s, im0 = Path(path), '', im0s
 
-    # to float
-    if half:
-        pred = pred.float()
+    save_path = str(save_dir / p.name)
+    txt_path = str(save_dir / 'labels' / p.stem) + ('_%g' % dataset.frame if dataset.mode == 'video' else '')
+    s += '%gx%g ' % img.shape[2:]  # print string
+    gn = torch.tensor(im0.shape)[[1, 0, 1, 0]]  # normalization gain whwh
+    if len(det):
+        # Rescale boxes from img_size to im0 size
+        det[:, :4] = scale_coords(img.shape[2:], det[:, :4], im0.shape).round()
 
-    # Apply NMS
-    pred = non_max_suppression(pred, opt.conf_thres, opt.iou_thres, multi_label=False, classes=opt.classes, agnostic=opt.agnostic_nms)
+        # Print results
+        for c in det[:, -1].unique():
+            n = (det[:, -1] == c).sum()  # detections per class
+            s += '%g %ss, ' % (n, names[int(c)])  # add to string
 
-    # Apply Classifier
-    if classify:
-        pred = apply_classifier(pred, modelc, img, im0s)
+        # Write results
+        for *xyxy, conf, cls in reversed(det):
+            if save_img or view_img:  # Add bbox to image
+                label = '%s %.2f' % (names[int(cls)], conf)
+                plot_bbox_and_depth(xyxy, im0, label=label, color=colors[int(cls)])
+                color_detection(im0, xyxy, color=colors[int(cls)])
 
-    # Process detections
-    for i, det in enumerate(pred):  # detections for image i
-        p, s, im0 = path, '', im0s
-
-        s += '%gx%g ' % img.shape[2:]  # print string
-        gn = torch.tensor(im0.shape)[[1, 0, 1, 0]]  #  normalization gain whwh
-        if det is not None and len(det):
-            # Rescale boxes from imgsz to im0 size
-            det[:, :4] = scale_coords(img.shape[2:], det[:, :4], im0.shape).round()
-
-            # Print results
-            for c in det[:, -1].unique():
-                n = (det[:, -1] == c).sum()  # detections per class
-                s += '%g %ss, ' % (n, names[int(c)])  # add to string
-
-            # Write results
-            for *xyxy, conf, cls in reversed(det):
-                if save_txt:  # Write to file
-                    xywh = (xyxy2xywh(torch.tensor(xyxy).view(1, 4)) / gn).view(-1).tolist()  # normalized xywh
-                    with open(save_path[:save_path.rfind('.')] + '.txt', 'a') as file:
-                        file.write(('%g ' * 5 + '\n') % (cls, *xywh))  # label format
-
-                if save_img or view_img:  # Add bbox to image
-                    label = '%s %.2f' % (names[int(cls)], conf)
-                    plot_one_box(xyxy, im0, label=label, color=colors[int(cls)])
-                    color_detection(im0, xyxy, color=colors[int(cls)])
-                      
 
 #--------------------------------------------------------------------------------------------------
 
@@ -304,7 +288,16 @@ def _run_inference(output_dir=output_dir,
           image_frame = np.concatenate((im_batch[0], color_map), axis=0)
           image_frame = (image_frame * 255.0).astype(np.uint8)
           image_frame = cv2.cvtColor(image_frame, cv2.COLOR_RGB2BGR)
-          detect(image_frame)
+          
+          #YOLO here
+          with torch.no_grad():
+            if opt.update:  # update all models (to fix SourceChangeWarning)
+              for opt.weights in ['yolov5s.pt', 'yolov5m.pt', 'yolov5l.pt', 'yolov5x.pt']:
+                detect(image_frame)
+                strip_optimizer(opt.weights)
+            else:
+              detect(image_frame)
+
 
           ##inout yolo detector around here!
 
@@ -321,6 +314,7 @@ def main(_):
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
+    parser.add_argument('--weights', nargs='+', type=str, default='yolov5s.pt', help='model.pt path(s)')
     parser.add_argument('--classes', nargs='+', type=int, help='filter by class')
     parser.add_argument('--conf-thres', type=float, default=0.3, help='object confidence threshold')
     parser.add_argument('--iou-thres', type=float, default=0.6, help='IOU threshold for NMS')
@@ -330,6 +324,7 @@ if __name__ == '__main__':
     parser.add_argument('--half', action='store_true', help='half precision FP16 inference')
     parser.add_argument('--view-img', action='store_true', help='display results')
     parser.add_argument('--save-txt', action='store_true', help='save results to *.txt')
+    parser.add_argument('--update', action='store_true', help='update all models')
     opt = parser.parse_args()
 
     app.run(main)
