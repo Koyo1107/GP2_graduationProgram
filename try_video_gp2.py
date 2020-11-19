@@ -13,6 +13,181 @@ import cv2
 
 gfile = tf.gfile
 
+#yolo from here-----
+import torch
+import argparse
+from utils.datasets import *
+from utils.utils import *
+from models import *
+#------------------
+
+#----------------------------------------------------------------------------------------------------------------------
+#get bbox and color data
+
+color_data = []
+
+#from https://qiita.com/yasudadesu/items/dd3e74dcc7e8f72bc680
+
+def drow_texts(img, x, y, texts, font_scale, color, thickness):
+    initial_y = 0
+    dy = int (img.shape[0] / 20)
+
+    texts = [texts] if type(texts) == str else texts
+
+    for i, text in enumerate(texts):
+        offset_y = y + (i+1)*dy
+        cv2.putText(img, text, (x, offset_y), cv2.FONT_HERSHEY_SIMPLEX, font_scale, color, thickness, cv2.LINE_AA)
+
+
+def color_detection(img, xy, color=None):
+    harf_height = int(img.shape[0] / 2)
+    #get box area
+    boxFromX = int(xy[0])
+    boxFromY = int(xy[1] + harf_height)
+    boxToX = int(xy[2])
+    boxToY = int(xy[3] + harf_height)
+
+    #get box
+    imgBox = img[boxFromY: boxToY, boxFromX:boxToX]
+
+    #flatten and out RGB mean
+    b = int(imgBox.T[0].flatten().mean())
+    g = int(imgBox.T[1].flatten().mean())
+    r = int(imgBox.T[2].flatten().mean())
+
+    #wite color data on the depth
+    color = color or [random.randint(0, 255) for _ in range(3)]
+    tl = round(0.002 * (img.shape[0] + img.shape[1]) / 2) 
+    text = ["B: %.2f" % (b), "G: %.2f" % (g), "R: %.2f" % (r)]
+    drow_texts(img, boxFromX, boxFromY, text, 0.3, color, tl)
+
+#----------------------------------------------------------------------------------------------------------------------
+#write bbox on depth trying
+def plot_bbox_and_depth(x, img, color=None, label=None, line_thickness=None):
+    # Plots one bounding box on image img
+    tl = line_thickness or round(0.002 * (img.shape[0] + img.shape[1]) / 2) + 1  # line/font thickness
+    color = color or [random.randint(0, 255) for _ in range(3)]
+    c1, c2 = (int(x[0]), int(x[1])), (int(x[2]), int(x[3]))
+    cv2.rectangle(img, c1, c2, color, thickness=tl, lineType=cv2.LINE_AA)
+    if label:
+        tf = max(tl - 1, 1)  # font thickness
+        t_size = cv2.getTextSize(label, 0, fontScale=tl / 3, thickness=tf)[0]
+        c2 = c1[0] + t_size[0], c1[1] - t_size[1] - 3
+        cv2.rectangle(img, c1, c2, color, -1, cv2.LINE_AA)  # filled
+        cv2.putText(img, label, (c1[0], c1[1] - 2), 0, tl / 3, [225, 255, 255], thickness=tf, lineType=cv2.LINE_AA)
+    harf_ymax = int(img.shape[0] / 2)
+    k1, k2 = (int(x[0]), int(x[1]) + harf_ymax), (int(x[2]), int(x[3]) + harf_ymax)
+    cv2.rectangle(img, k1, k2, color, thickness=tl, lineType=cv2.LINE_AA)
+
+#yolov3
+def detect(get_img, save_img=False): 
+    img_size = 512 
+    weights = 'weights/yolov3-spp-ultralytics.pt'
+    cfg_ = 'cfg/yolov3-spp.cfg'
+    names_ = 'data/coco.names'
+    fourcc = 'mp4'
+    half = opt.half
+    view_img = opt.view_img
+    save_txt = opt.save_txt
+
+    imgsz = img_size
+
+    # Initialize
+    device = torch_utils.select_device(device='cpu' if ONNX_EXPORT else opt.device)
+
+    # Initialize model
+    model = Darknet(cfg_, imgsz)
+
+    # Load weights
+    attempt_download(weights)
+    if weights.endswith('.pt'):  # pytorch format
+        model.load_state_dict(torch.load(weights, map_location=device)['model'])
+    else:  # darknet format
+        load_darknet_weights(model, weights)
+
+    # Second-stage classifier
+    classify = False
+    if classify:
+        modelc = torch_utils.load_classifier(name='resnet101', n=2)  # initialize
+        modelc.load_state_dict(torch.load('weights/resnet101.pt', map_location=device)['model'])  # load weights
+        modelc.to(device).eval()
+
+    # Eval mode
+    model.to(device).eval()
+
+    # Fuse Conv2d + BatchNorm2d layers
+    # model.fuse()
+    half = half and device.type != 'cpu'  # half precision only supported on CUDA
+    if half:
+        model.half()
+
+    vid_path, vid_writer = None, None
+    save_img = True
+
+    # Get names and colors
+    names = load_classes(names_)
+    colors = [[random.randint(0, 255) for _ in range(3)] for _ in range(len(names))]
+
+    # Run inference
+
+    img = torch.zeros((1, 3, imgsz, imgsz), device=device)  # init img
+    _ = model(img.half() if half else img.float()) if device.type != 'cpu' else None  # run once
+    path = get_img
+    img = get_img
+    im0s = get_img
+    img = torch.from_numpy(img).to(device)
+    img = img.half() if half else img.float()  # uint8 to fp16/32
+    img /= 255.0  # 0 - 255 to 0.0 - 1.0
+    if img.ndimension() == 3:
+        img = img.unsqueeze(0)
+
+    # Inference
+    t1 = torch_utils.time_synchronized()
+    pred = model(img, augment=opt.augment)[0]
+    t2 = torch_utils.time_synchronized()
+
+    # to float
+    if half:
+        pred = pred.float()
+
+    # Apply NMS
+    pred = non_max_suppression(pred, opt.conf_thres, opt.iou_thres, multi_label=False, classes=opt.classes, agnostic=opt.agnostic_nms)
+
+    # Apply Classifier
+    if classify:
+        pred = apply_classifier(pred, modelc, img, im0s)
+
+    # Process detections
+    for i, det in enumerate(pred):  # detections for image i
+        p, s, im0 = path, '', im0s
+
+        s += '%gx%g ' % img.shape[2:]  # print string
+        gn = torch.tensor(im0.shape)[[1, 0, 1, 0]]  #  normalization gain whwh
+        if det is not None and len(det):
+            # Rescale boxes from imgsz to im0 size
+            det[:, :4] = scale_coords(img.shape[2:], det[:, :4], im0.shape).round()
+
+            # Print results
+            for c in det[:, -1].unique():
+                n = (det[:, -1] == c).sum()  # detections per class
+                s += '%g %ss, ' % (n, names[int(c)])  # add to string
+
+            # Write results
+            for *xyxy, conf, cls in reversed(det):
+                if save_txt:  # Write to file
+                    xywh = (xyxy2xywh(torch.tensor(xyxy).view(1, 4)) / gn).view(-1).tolist()  # normalized xywh
+                    with open(save_path[:save_path.rfind('.')] + '.txt', 'a') as file:
+                        file.write(('%g ' * 5 + '\n') % (cls, *xywh))  # label format
+
+                if save_img or view_img:  # Add bbox to image
+                    label = '%s %.2f' % (names[int(cls)], conf)
+                    plot_one_box(xyxy, im0, label=label, color=colors[int(cls)])
+                    color_detection(im0, xyxy, color=colors[int(cls)])
+                      
+
+#--------------------------------------------------------------------------------------------------
+
+
 def mask_image_stack(input_image_stack, input_seg_seq):
   background = [mask == 0 for mask in input_seg_seq]
   background = reduce(lambda m1, m2: m1 & m2, background)
@@ -129,64 +304,32 @@ def _run_inference(output_dir=output_dir,
           image_frame = np.concatenate((im_batch[0], color_map), axis=0)
           image_frame = (image_frame * 255.0).astype(np.uint8)
           image_frame = cv2.cvtColor(image_frame, cv2.COLOR_RGB2BGR)
+          detect(image_frame)
+
+          ##inout yolo detector around here!
 
           out.write(image_frame)
           im_batch = []
-
-"""       if egomotion:exi
-        if inference_mode == INFERENCE_MODE_SINGLE:
-          # Run regular egomotion inference loop.
-          input_image_seq = []
-          input_seg_seq = []
-          current_sequence_dir = None
-          current_output_handle = None
-          for i in range(len(im_files)):
-            sequence_dir = os.path.dirname(im_files[i])
-            if sequence_dir != current_sequence_dir:
-              # Assume start of a new sequence, since this image lies in a
-              # different directory than the previous ones.
-              # Clear egomotion input buffer.
-              output_filepath = os.path.join(output_dirs[i], 'egomotion.txt')
-              if current_output_handle is not None:
-                current_output_handle.close()
-              current_sequence_dir = sequence_dir
-              logging.info('Writing egomotion sequence to %s.', output_filepath)
-              current_output_handle = gfile.Open(output_filepath, 'w')
-              input_image_seq = []
-            im = util.load_image(im_files[i], resize=(img_width, img_height))
-            input_image_seq.append(im)
-            if use_masks:
-              im_seg_path = im_files[i].replace('.%s' % file_extension, '-seg.%s' % file_extension)
-              if not gfile.Exists(im_seg_path):
-                raise ValueError('No segmentation mask %s has been found for image %s. If none are available, disable use_masks.' % (im_seg_path, im_files[i]))
-              input_seg_seq.append(util.load_image(im_seg_path, resize=(img_width, img_height), interpolation='nn'))
-
-            if len(input_image_seq) < seq_length:  # Buffer not filled yet.
-              continue
-            if len(input_image_seq) > seq_length:  # Remove oldest entry.
-              del input_image_seq[0]
-              if use_masks:
-                del input_seg_seq[0]
-
-            input_image_stack = np.concatenate(input_image_seq, axis=2)
-            input_image_stack = np.expand_dims(input_image_stack, axis=0)
-            if use_masks:
-              input_image_stack = mask_image_stack(input_image_stack, input_seg_seq)
-            est_egomotion = np.squeeze(inference_model.inference_egomotion(input_image_stack, sess))
-            egomotion_str = []
-            for j in range(seq_length - 1):
-              egomotion_str.append(','.join([str(d) for d in est_egomotion[j]]))
-            current_output_handle.write(str(i) + ' ' + ' '.join(egomotion_str) + '\n')
-          if current_output_handle is not None:
-            current_output_handle.close() """
 
     logging.info('Done.')
     video_capture.release()
     out.release()
 
-    
+
 def main(_):
   _run_inference()
 
 if __name__ == '__main__':
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--classes', nargs='+', type=int, help='filter by class')
+    parser.add_argument('--conf-thres', type=float, default=0.3, help='object confidence threshold')
+    parser.add_argument('--iou-thres', type=float, default=0.6, help='IOU threshold for NMS')
+    parser.add_argument('--agnostic-nms', action='store_true', help='class-agnostic NMS')
+    parser.add_argument('--device', default='', help='device id (i.e. 0 or 0,1) or cpu')
+    parser.add_argument('--augment', action='store_true', help='augmented inference')
+    parser.add_argument('--half', action='store_true', help='half precision FP16 inference')
+    parser.add_argument('--view-img', action='store_true', help='display results')
+    parser.add_argument('--save-txt', action='store_true', help='save results to *.txt')
+    opt = parser.parse_args()
+
     app.run(main)
