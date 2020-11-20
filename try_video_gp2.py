@@ -96,10 +96,6 @@ def detect(source, save_img=False):
   view_img = opt.view_img
   imgsz = 640
 
-  # Directories
-  #save_dir = Path(increment_path(Path(opt.project) / opt.name, exist_ok=opt.exist_ok))  # increment run
-  #(save_dir / 'labels' if save_txt else save_dir).mkdir(parents=True, exist_ok=True)  # make dir
-
   # Initialize
   set_logging()
   device = select_device(opt.device)
@@ -114,25 +110,17 @@ def detect(source, save_img=False):
   # Second-stage classifier
   classify = False
   if classify:
-      modelc = load_classifier(name='resnet101', n=2)  # initialize
-      modelc.load_state_dict(torch.load('weights/resnet101.pt', map_location=device)['model']).to(device).eval()
-
-  # Set Dataloader
-  #vid_path, vid_writer = None, None
-  #dataset = LoadStreams(source, img_size=imgsz)
+    modelc = load_classifier(name='resnet101', n=2)  # initialize
+    modelc.load_state_dict(torch.load('weights/resnet101.pt', map_location=device)['model']).to(device).eval()  
 
   # Get names and colors
   names = model.module.names if hasattr(model, 'module') else model.names
   colors = [[random.randint(0, 255) for _ in range(3)] for _ in names]
 
   # Run inference
-  img = torch.zeros((1, 3, imgsz, imgsz), device=device)  # init img
-  _ = model(img.half() if half else img) if device.type != 'cpu' else None  # run once
-  img = torch.from_numpy(source).to(device)
-  img = img.half() if half else img.float()  # uint8 to fp16/32
-  img /= 255.0  # 0 - 255 to 0.0 - 1.0
-  if img.ndimension() == 3:
-      img = img.unsqueeze(0)
+  #img = torch.zeros((1, 3, imgsz, imgsz), device=device)  # init img
+  img = torch.from_numpy(source)
+  logging.info(img.shape)
 
   # Inference
   pred = model(img, augment=opt.augment)[0]
@@ -147,26 +135,23 @@ def detect(source, save_img=False):
   # Process detections
   for i, det in enumerate(pred):  # detections per image
     p, s, im0 = Path(path), '', im0s
-
-    save_path = str(save_dir / p.name)
-    txt_path = str(save_dir / 'labels' / p.stem) + ('_%g' % dataset.frame if dataset.mode == 'video' else '')
     s += '%gx%g ' % img.shape[2:]  # print string
     gn = torch.tensor(im0.shape)[[1, 0, 1, 0]]  # normalization gain whwh
     if len(det):
-        # Rescale boxes from img_size to im0 size
-        det[:, :4] = scale_coords(img.shape[2:], det[:, :4], im0.shape).round()
+      # Rescale boxes from img_size to im0 size
+      det[:, :4] = scale_coords(img.shape[2:], det[:, :4], im0.shape).round()
 
-        # Print results
-        for c in det[:, -1].unique():
-            n = (det[:, -1] == c).sum()  # detections per class
-            s += '%g %ss, ' % (n, names[int(c)])  # add to string
+      # Print results
+      for c in det[:, -1].unique():
+        n = (det[:, -1] == c).sum()  # detections per class
+        s += '%g %ss, ' % (n, names[int(c)])  # add to string
 
-        # Write results
-        for *xyxy, conf, cls in reversed(det):
-            if save_img or view_img:  # Add bbox to image
-                label = '%s %.2f' % (names[int(cls)], conf)
-                plot_bbox_and_depth(xyxy, im0, label=label, color=colors[int(cls)])
-                color_detection(im0, xyxy, color=colors[int(cls)])
+      # Write results
+      for *xyxy, conf, cls in reversed(det):
+          if save_img or view_img:  # Add bbox to image
+            label = '%s %.2f' % (names[int(cls)], conf)
+            plot_bbox_and_depth(xyxy, im0, label=label, color=colors[int(cls)])
+            color_detection(im0, xyxy, color=colors[int(cls)])
 
 
 #--------------------------------------------------------------------------------------------------
@@ -284,22 +269,9 @@ def _run_inference(output_dir=output_dir,
           est_depth = inference_model.inference_depth(im_batch, sess)
           
           color_map = util.normalize_depth_for_display(np.squeeze(est_depth))
-          #color_map = (color_map * 255.0).astype(np.uint8)
           image_frame = np.concatenate((im_batch[0], color_map), axis=0)
           image_frame = (image_frame * 255.0).astype(np.uint8)
           image_frame = cv2.cvtColor(image_frame, cv2.COLOR_RGB2BGR)
-          
-          #YOLO here
-          with torch.no_grad():
-            if opt.update:  # update all models (to fix SourceChangeWarning)
-              for opt.weights in ['yolov5s.pt', 'yolov5m.pt', 'yolov5l.pt', 'yolov5x.pt']:
-                detect(image_frame)
-                strip_optimizer(opt.weights)
-            else:
-              detect(image_frame)
-
-
-          ##inout yolo detector around here!
 
           out.write(image_frame)
           im_batch = []
