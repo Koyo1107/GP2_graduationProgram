@@ -94,7 +94,8 @@ def plot_bbox_and_depth(x, img, color=None, label=None, line_thickness=None):
 def detect(source, save_img=False):
   weights = opt.weights
   view_img = opt.view_img
-  imgsz = 640
+  #imgsz = 640
+
 
   # Initialize
   set_logging()
@@ -103,7 +104,7 @@ def detect(source, save_img=False):
 
   # Load model
   model = attempt_load(weights, map_location=device)  # load FP32 model
-  imgsz = check_img_size(imgsz, s=model.stride.max())  # check img_size
+  #imgsz = check_img_size(imgsz, s=model.stride.max())  # check img_size
   if half:
       model.half()  # to FP16
 
@@ -119,6 +120,7 @@ def detect(source, save_img=False):
 
   # Run inference
   #img = torch.zeros((1, 3, imgsz, imgsz), device=device)  # init img
+  #source = source[[2, 1, 0]]
   img = torch.from_numpy(source)
   logging.info(img.shape)
 
@@ -255,9 +257,6 @@ def _run_inference(output_dir=output_dir,
           ret, im = video_capture.read()
 
           im = cv2.cvtColor(im, cv2.COLOR_BGR2RGB)
-          #VGAの画像を切り出して416x128に合わせる
-          #ymin, ymax, xmin, xmax = [142, 339, 0, 640]
-          #im = im[ymin:ymax, xmin:xmax]
           im = cv2.resize(im, (img_width, img_height))
           im = np.array(im, dtype=np.float32) / 255.0
 
@@ -270,8 +269,12 @@ def _run_inference(output_dir=output_dir,
           
           color_map = util.normalize_depth_for_display(np.squeeze(est_depth))
           image_frame = np.concatenate((im_batch[0], color_map), axis=0)
+          logging.info(image_frame.shape)
           image_frame = (image_frame * 255.0).astype(np.uint8)
           image_frame = cv2.cvtColor(image_frame, cv2.COLOR_RGB2BGR)
+
+
+          detect(image_frame)
 
           out.write(image_frame)
           im_batch = []
@@ -279,7 +282,6 @@ def _run_inference(output_dir=output_dir,
     logging.info('Done.')
     video_capture.release()
     out.release()
-
 
 def main(_):
   _run_inference()
