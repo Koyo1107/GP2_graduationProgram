@@ -120,9 +120,15 @@ def detect(source, save_img=False):
 
   # Run inference
   #img = torch.zeros((1, 3, imgsz, imgsz), device=device)  # init img
+  #for path, img, im0s, vid_cap in dataset:
+  #  img = torch.from_numpy(img).to(device)
+  #  img = img.half() if half else img.float()  # uint8 to fp16/32
+  #  img /= 255.0  # 0 - 255 to 0.0 - 1.0
+  #  if img.ndimension() == 3:
+  #      img = img.unsqueeze(0)
   #source = source[[2, 1, 0]]
   img = torch.from_numpy(source)
-  logging.info(img.shape)
+  #logging.info(img.shape)
 
   # Inference
   pred = model(img, augment=opt.augment)[0]
@@ -269,7 +275,7 @@ def _run_inference(output_dir=output_dir,
           
           color_map = util.normalize_depth_for_display(np.squeeze(est_depth))
           image_frame = np.concatenate((im_batch[0], color_map), axis=0)
-          logging.info(image_frame.shape)
+          #logging.info(image_frame.shape)
           image_frame = (image_frame * 255.0).astype(np.uint8)
           image_frame = cv2.cvtColor(image_frame, cv2.COLOR_RGB2BGR)
 
