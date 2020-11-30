@@ -24,12 +24,46 @@ import torch.backends.cudnn as cudnn
 from numpy import random
 
 from models.experimental import attempt_load
-from utils.datasets import LoadStreams, LoadImages
+from utils.datasets import LoadStreams
 from utils.general import check_img_size, non_max_suppression, apply_classifier, scale_coords, xyxy2xywh, \
     strip_optimizer, set_logging, increment_path
 from utils.plots import plot_one_box
 from utils.torch_utils import select_device, load_classifier, time_synchronized
+
+output_size = (416, 256)
+
 #------------------
+def letterbox(img, new_shape=(640, 640), color=(114, 114, 114), auto=True, scaleFill=False, scaleup=True):
+    # Resize image to a 32-pixel-multiple rectangle https://github.com/ultralytics/yolov3/issues/232
+    shape = img.shape[:2]  # current shape [height, width]
+    if isinstance(new_shape, int):
+        new_shape = (new_shape, new_shape)
+
+    # Scale ratio (new / old)
+    r = min(new_shape[0] / shape[0], new_shape[1] / shape[1])
+    if not scaleup:  # only scale down, do not scale up (for better test mAP)
+        r = min(r, 1.0)
+
+    # Compute padding
+    ratio = r, r  # width, height ratios
+    new_unpad = int(round(shape[1] * r)), int(round(shape[0] * r))
+    dw, dh = new_shape[1] - new_unpad[0], new_shape[0] - new_unpad[1]  # wh padding
+    if auto:  # minimum rectangle
+        dw, dh = np.mod(dw, 32), np.mod(dh, 32)  # wh padding
+    elif scaleFill:  # stretch
+        dw, dh = 0.0, 0.0
+        new_unpad = (new_shape[1], new_shape[0])
+        ratio = new_shape[1] / shape[1], new_shape[0] / shape[0]  # width, height ratios
+
+    dw /= 2  # divide padding into 2 sides
+    dh /= 2
+
+    if shape[::-1] != new_unpad:  # resize
+        img = cv2.resize(img, new_unpad, interpolation=cv2.INTER_LINEAR)
+    top, bottom = int(round(dh - 0.1)), int(round(dh + 0.1))
+    left, right = int(round(dw - 0.1)), int(round(dw + 0.1))
+    img = cv2.copyMakeBorder(img, top, bottom, left, right, cv2.BORDER_CONSTANT, value=color)  # add border
+    return img, ratio, (dw, dh)
 
 #----------------------------------------------------------------------------------------------------------------------
 #get bbox and color data
@@ -89,80 +123,6 @@ def plot_bbox_and_depth(x, img, color=None, label=None, line_thickness=None):
     k1, k2 = (int(x[0]), int(x[1]) + harf_ymax), (int(x[2]), int(x[3]) + harf_ymax)
     cv2.rectangle(img, k1, k2, color, thickness=tl, lineType=cv2.LINE_AA)
 
-#--------------------------------------yolo main--------------------------------------------
-
-def detect(source, save_img=False):
-  weights = opt.weights
-  view_img = opt.view_img
-  #imgsz = 640
-
-
-  # Initialize
-  set_logging()
-  device = select_device(opt.device)
-  half = device.type != 'cpu'  # half precision only supported on CUDA
-
-  # Load model
-  model = attempt_load(weights, map_location=device)  # load FP32 model
-  #imgsz = check_img_size(imgsz, s=model.stride.max())  # check img_size
-  if half:
-      model.half()  # to FP16
-
-  # Second-stage classifier
-  classify = False
-  if classify:
-    modelc = load_classifier(name='resnet101', n=2)  # initialize
-    modelc.load_state_dict(torch.load('weights/resnet101.pt', map_location=device)['model']).to(device).eval()  
-
-  # Get names and colors
-  names = model.module.names if hasattr(model, 'module') else model.names
-  colors = [[random.randint(0, 255) for _ in range(3)] for _ in names]
-
-  # Run inference
-  #img = torch.zeros((1, 3, imgsz, imgsz), device=device)  # init img
-  #for path, img, im0s, vid_cap in dataset:
-  #  img = torch.from_numpy(img).to(device)
-  #  img = img.half() if half else img.float()  # uint8 to fp16/32
-  #  img /= 255.0  # 0 - 255 to 0.0 - 1.0
-  #  if img.ndimension() == 3:
-  #      img = img.unsqueeze(0)
-  #source = source[[2, 1, 0]]
-  img = torch.from_numpy(source)
-  #logging.info(img.shape)
-
-  # Inference
-  pred = model(img, augment=opt.augment)[0]
-
-  # Apply NMS
-  pred = non_max_suppression(pred, opt.conf_thres, opt.iou_thres, classes=opt.classes, agnostic=opt.agnostic_nms)
-
-  # Apply Classifier
-  if classify:
-    pred = apply_classifier(pred, modelc, img, im0s)
-
-  # Process detections
-  for i, det in enumerate(pred):  # detections per image
-    p, s, im0 = Path(path), '', im0s
-    s += '%gx%g ' % img.shape[2:]  # print string
-    gn = torch.tensor(im0.shape)[[1, 0, 1, 0]]  # normalization gain whwh
-    if len(det):
-      # Rescale boxes from img_size to im0 size
-      det[:, :4] = scale_coords(img.shape[2:], det[:, :4], im0.shape).round()
-
-      # Print results
-      for c in det[:, -1].unique():
-        n = (det[:, -1] == c).sum()  # detections per class
-        s += '%g %ss, ' % (n, names[int(c)])  # add to string
-
-      # Write results
-      for *xyxy, conf, cls in reversed(det):
-          if save_img or view_img:  # Add bbox to image
-            label = '%s %.2f' % (names[int(cls)], conf)
-            plot_bbox_and_depth(xyxy, im0, label=label, color=colors[int(cls)])
-            color_detection(im0, xyxy, color=colors[int(cls)])
-
-
-#--------------------------------------------------------------------------------------------------
 
 
 def mask_image_stack(input_image_stack, input_seg_seq):
@@ -206,7 +166,83 @@ model_ckpt = 'model/KITTI/model-199160'
 video_data = 'short_traffic_demo.mp4'
 output_dir = 'test_output'
 
-def _run_inference(output_dir=output_dir,
+#--------------------------------------yolo main--------------------------------------------
+
+def detect(source, save_img=False):
+  weights = opt.weights
+  view_img = opt.view_img
+
+  # Initialize
+  set_logging()
+  device = select_device(opt.device)
+  half = device.type != 'cpu'  # half precision only supported on CUDA
+
+  # Load model
+  model = attempt_load(weights, map_location=device)  # load FP32 model
+  #imgsz = check_img_size(imgsz, s=model.stride.max())  # check img_size
+  if half:
+      model.half()  # to FP16
+
+  # Second-stage classifier
+  classify = False
+  if classify:
+    modelc = load_classifier(name='resnet101', n=2)  # initialize
+    modelc.load_state_dict(torch.load('weights/resnet101.pt', map_location=device)['model']).to(device).eval()  
+
+  img0 = source  # BGR
+  img = letterbox(img0, new_shape=output_size)[0]
+  img = img[:, :, ::-1].transpose(2, 0, 1)  # BGR to RGB, to 3x416x416
+  img = np.ascontiguousarray(img)
+
+  # Get names and colors
+  names = model.module.names if hasattr(model, 'module') else model.names
+  colors = [[random.randint(0, 255) for _ in range(3)] for _ in names]
+
+  # Run inference
+  #img = torch.zeros((1, 3, imgsz, imgsz), device=device)  # init img
+  img = torch.from_numpy(img).to(device)
+  im0s = img0
+  img = img.half() if half else img.float()  # uint8 to fp16/32
+  img /= 255.0  # 0 - 255 to 0.0 - 1.0
+  if img.ndimension() == 3:
+    img = img.unsqueeze(0)
+
+  # Inference
+  pred = model(img, augment=opt.augment)[0]
+
+  # Apply NMS
+  pred = non_max_suppression(pred, opt.conf_thres, opt.iou_thres, classes=opt.classes, agnostic=opt.agnostic_nms)
+
+  # Apply Classifier
+  if classify:
+    pred = apply_classifier(pred, modelc, img, im0s)
+
+  # Process detections
+  for i, det in enumerate(pred):  # detections per image
+    s, im0 = '', im0s
+    s += '%gx%g ' % img.shape[2:]  # print string
+    gn = torch.tensor(im0.shape)[[1, 0, 1, 0]]  # normalization gain whwh
+    if len(det):
+      # Rescale boxes from img_size to im0 size
+      det[:, :4] = scale_coords(img.shape[2:], det[:, :4], im0.shape).round()
+
+      # Print results
+      for c in det[:, -1].unique():
+        n = (det[:, -1] == c).sum()  # detections per class
+        s += '%g %ss, ' % (n, names[int(c)])  # add to string
+
+      # Write results
+      for *xyxy, conf, cls in reversed(det):
+          if save_img or view_img:  # Add bbox to image
+            label = '%s %.2f' % (names[int(cls)], conf)
+            plot_bbox_and_depth(xyxy, im0, label=label, color=colors[int(cls)])
+            color_detection(im0, xyxy, color=colors[int(cls)])
+
+
+#--------------------------------------------------------------------------------------------------
+
+
+def run_inference(output_dir=output_dir,
                    file_extension='png',
                    depth=True,
                    egomotion=False,
@@ -225,7 +261,6 @@ def _run_inference(output_dir=output_dir,
                    inference_mode=INFERENCE_MODE_SINGLE,
                    inference_crop=INFERENCE_CROP_NONE,
                    use_masks=False):
-
   inference_model = model.Model(is_training=False,
                                 batch_size=batch_size,
                                 img_height=img_height,
@@ -248,8 +283,9 @@ def _run_inference(output_dir=output_dir,
     video_capture = cv2.VideoCapture(video_data)
     fourcc = cv2.VideoWriter_fourcc('m', 'p', '4', 'v')
     fps = int(video_capture.get(cv2.CAP_PROP_FPS))
-    out = cv2.VideoWriter(output_dir + '/' + 'try_1109.mp4', fourcc, fps, (416, 256))
+    out = cv2.VideoWriter(output_dir + '/' + 'try_1130.mp4', fourcc, fps, output_size)
     frame_count = (int(video_capture.get(cv2.CAP_PROP_FRAME_COUNT)))
+
 
     while True:
       if depth:
@@ -279,18 +315,20 @@ def _run_inference(output_dir=output_dir,
           image_frame = (image_frame * 255.0).astype(np.uint8)
           image_frame = cv2.cvtColor(image_frame, cv2.COLOR_RGB2BGR)
 
-
-          detect(image_frame)
+          detect(image_frame) #yolo
 
           out.write(image_frame)
+          logging.info('Frame written')
           im_batch = []
 
     logging.info('Done.')
     video_capture.release()
     out.release()
 
+
+
 def main(_):
-  _run_inference()
+  run_inference()
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
@@ -308,3 +346,4 @@ if __name__ == '__main__':
     opt = parser.parse_args()
 
     app.run(main)
+
