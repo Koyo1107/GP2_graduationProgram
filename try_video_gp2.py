@@ -168,9 +168,10 @@ output_dir = 'test_output'
 
 #--------------------------------------yolo main--------------------------------------------
 
-def detect(source, save_img=False):
+def detect(source, save_img=True):
   weights = opt.weights
   view_img = opt.view_img
+  save_txt = opt.save_txt
 
   # Initialize
   set_logging()
@@ -222,7 +223,7 @@ def detect(source, save_img=False):
     s, im0 = '', im0s
     s += '%gx%g ' % img.shape[2:]  # print string
     gn = torch.tensor(im0.shape)[[1, 0, 1, 0]]  # normalization gain whwh
-    if len(det):
+    if det is not None and len(det):
       # Rescale boxes from img_size to im0 size
       det[:, :4] = scale_coords(img.shape[2:], det[:, :4], im0.shape).round()
 
@@ -233,10 +234,16 @@ def detect(source, save_img=False):
 
       # Write results
       for *xyxy, conf, cls in reversed(det):
-          if save_img or view_img:  # Add bbox to image
-            label = '%s %.2f' % (names[int(cls)], conf)
-            plot_bbox_and_depth(xyxy, im0, label=label, color=colors[int(cls)])
-            color_detection(im0, xyxy, color=colors[int(cls)])
+        if save_txt:  # Write to file
+          xywh = (xyxy2xywh(torch.tensor(xyxy).view(1, 4)) / gn).view(-1).tolist()
+          file.write(('%g ' * 5 + '\n') % (cls, *xywh))  # label format
+          logging.info('save.txt')
+
+        if save_img or view_img:  # Add bbox to image
+          label = '%s %.2f' % (names[int(cls)], conf)
+          plot_bbox_and_depth(xyxy, im0, label=label, color=colors[int(cls)])
+          color_detection(im0, xyxy, color=colors[int(cls)])
+          logging.info('plot bbox')
 
 
 #--------------------------------------------------------------------------------------------------
