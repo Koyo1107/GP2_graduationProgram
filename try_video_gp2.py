@@ -30,7 +30,9 @@ from utils.general import check_img_size, non_max_suppression, apply_classifier,
 from utils.plots import plot_one_box
 from utils.torch_utils import select_device, load_classifier, time_synchronized
 
-output_size = (416, 256)
+img_w = 416
+img_h = 512
+output_size=(img_w, img_h)
 
 #------------------
 def letterbox(img, new_shape=(640, 640), color=(114, 114, 114), auto=True, scaleFill=False, scaleup=True):
@@ -186,9 +188,9 @@ def detect(source, save_img=True):
 
   # Second-stage classifier
   classify = False
-  if classify:
-    modelc = load_classifier(name='resnet101', n=2)  # initialize
-    modelc.load_state_dict(torch.load('weights/resnet101.pt', map_location=device)['model']).to(device).eval()  
+  #if classify:
+  #  modelc = load_classifier(name='resnet101', n=2)  # initialize
+  #  modelc.load_state_dict(torch.load('weights/resnet101.pt', map_location=device)['model']).to(device).eval()  
 
   img0 = source  # BGR
   img = letterbox(img0, new_shape=output_size)[0]
@@ -232,18 +234,16 @@ def detect(source, save_img=True):
         n = (det[:, -1] == c).sum()  # detections per class
         s += '%g %ss, ' % (n, names[int(c)])  # add to string
 
+
       # Write results
       for *xyxy, conf, cls in reversed(det):
-        if save_txt:  # Write to file
-          xywh = (xyxy2xywh(torch.tensor(xyxy).view(1, 4)) / gn).view(-1).tolist()
-          file.write(('%g ' * 5 + '\n') % (cls, *xywh))  # label format
-          logging.info('save.txt')
-
         if save_img or view_img:  # Add bbox to image
-          label = '%s %.2f' % (names[int(cls)], conf)
-          plot_bbox_and_depth(xyxy, im0, label=label, color=colors[int(cls)])
-          color_detection(im0, xyxy, color=colors[int(cls)])
-          logging.info('plot bbox')
+          logging.info(cls)
+          if cls == 2 or cls == 5 or cls == 7:
+            label = '%s %.2f' % (names[int(cls)], conf)
+            plot_bbox_and_depth(xyxy, im0, label=label, color=colors[int(cls)])
+            #color_detection(im0, xyxy, color=colors[int(cls)])
+            logging.info('plot bbox')
 
 
 #--------------------------------------------------------------------------------------------------
@@ -256,7 +256,7 @@ def run_inference(output_dir=output_dir,
                    model_ckpt=model_ckpt,
                    input_list_file=None,
                    batch_size=1,
-                   img_height=128,
+                   img_height=256,
                    img_width=416,
                    seq_length=3,
                    architecture=nets.RESNET,
@@ -290,7 +290,7 @@ def run_inference(output_dir=output_dir,
     video_capture = cv2.VideoCapture(video_data)
     fourcc = cv2.VideoWriter_fourcc('m', 'p', '4', 'v')
     fps = int(video_capture.get(cv2.CAP_PROP_FPS))
-    out = cv2.VideoWriter(output_dir + '/' + 'try_1130.mp4', fourcc, fps, output_size)
+    out = cv2.VideoWriter(output_dir + '/' + 'try_1229.mp4', fourcc, fps, output_size)
     frame_count = (int(video_capture.get(cv2.CAP_PROP_FRAME_COUNT)))
 
 
@@ -303,6 +303,8 @@ def run_inference(output_dir=output_dir,
 
           if i % 100 == 0:
             logging.info('%s of %s files processed.', i, range(frame_count))
+
+          # struct2depth ここから ---------------------------
           ret, im = video_capture.read()
 
           im = cv2.cvtColor(im, cv2.COLOR_BGR2RGB)
@@ -321,6 +323,7 @@ def run_inference(output_dir=output_dir,
           #logging.info(image_frame.shape)
           image_frame = (image_frame * 255.0).astype(np.uint8)
           image_frame = cv2.cvtColor(image_frame, cv2.COLOR_RGB2BGR)
+          #structdepth　ここまで ---------------------------
 
           detect(image_frame) #yolo
 
@@ -331,7 +334,6 @@ def run_inference(output_dir=output_dir,
     logging.info('Done.')
     video_capture.release()
     out.release()
-
 
 
 def main(_):
@@ -353,4 +355,3 @@ if __name__ == '__main__':
     opt = parser.parse_args()
 
     app.run(main)
-
