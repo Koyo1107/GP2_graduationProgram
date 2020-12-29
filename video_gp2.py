@@ -13,275 +13,67 @@ import cv2
 
 gfile = tf.gfile
 
-INFERENCE_MODE_SINGLE = 'single'  # Take plain single-frame input.
-INFERENCE_MODE_TRIPLETS = 'triplets'  # Take image triplets as input.
-# For KITTI, we just resize input images and do not perform cropping. For
-# Cityscapes, the car hood and more image content has been cropped in order
-# to fit aspect ratio, and remove static content from the images. This has to be
-# kept at inference time.
-INFERENCE_CROP_NONE = 'none'
-INFERENCE_CROP_CITYSCAPES = 'cityscapes'
+#yolo from here-----
+import argparse
+import time
+from pathlib import Path
 
-input_dir = 'input_video'
-output_dir = 'semioutput'
-model_ckpt = 'model/KITTI/model-199160'
+import cv2
+import torch
+import torch.backends.cudnn as cudnn
+from numpy import random
 
-#--------------------------struct2depth functions------------------------------
-def mask_image_stack(input_image_stack, input_seg_seq):
-  """Masks out moving image contents by using the segmentation masks provided.
-  This can lead to better odometry accuracy for motion models, but is optional
-  to use. Is only called if use_masks is enabled.
-  Args:
-    input_image_stack: The input image stack of shape (1, H, W, seq_length).
-    input_seg_seq: List of segmentation masks with seq_length elements of shape
-                   (H, W, C) for some number of channels C.
-  Returns:
-    Input image stack with detections provided by segmentation mask removed.
-  """
-  background = [mask == 0 for mask in input_seg_seq]
-  background = reduce(lambda m1, m2: m1 & m2, background)
-  # If masks are RGB, assume all channels to be the same. Reduce to the first.
-  if background.ndim == 3 and background.shape[2] > 1:
-    background = np.expand_dims(background[:, :, 0], axis=2)
-  elif background.ndim == 2:  # Expand.
-    background = np.expand_dism(background, axis=2)
-  # background is now of shape (H, W, 1).
-  background_stack = np.tile(background, [1, 1, input_image_stack.shape[3]])
-  return np.multiply(input_image_stack, background_stack)
+from models.experimental import attempt_load
+from utils.datasets import LoadStreams
+from utils.general import check_img_size, non_max_suppression, apply_classifier, scale_coords, xyxy2xywh, \
+    strip_optimizer, set_logging, increment_path
+from utils.plots import plot_one_box
+from utils.torch_utils import select_device, load_classifier, time_synchronized
 
+img_w = 416
+img_h = 512
+output_size=(img_w, img_h)
 
-def collect_input_images(input_dir, input_list_file, file_extension):
-  """Collects all input images that are to be processed."""
-  if input_dir is not None:
-    im_files = _recursive_glob(input_dir, '*.' + file_extension)
-    basepath_in = os.path.normpath(input_dir)
-  elif input_list_file is not None:
-    im_files = util.read_text_lines(input_list_file)
-    basepath_in = os.path.dirname(input_list_file)
-    im_files = [os.path.join(basepath_in, f) for f in im_files]
-  im_files = [f for f in im_files if 'disp' not in f and '-seg' not in f and
-              '-fseg' not in f and '-flip' not in f]
-  return sorted(im_files), basepath_in
+#------------------
+def letterbox(img, new_shape=(640, 640), color=(114, 114, 114), auto=True, scaleFill=False, scaleup=True):
+    # Resize image to a 32-pixel-multiple rectangle https://github.com/ultralytics/yolov3/issues/232
+    shape = img.shape[:2]  # current shape [height, width]
+    if isinstance(new_shape, int):
+        new_shape = (new_shape, new_shape)
 
+    # Scale ratio (new / old)
+    r = min(new_shape[0] / shape[0], new_shape[1] / shape[1])
+    if not scaleup:  # only scale down, do not scale up (for better test mAP)
+        r = min(r, 1.0)
 
-def create_output_dirs(im_files, basepath_in, output_dir):
-  """Creates required directories, and returns output dir for each file."""
-  output_dirs = []
-  for i in range(len(im_files)):
-    relative_folder_in = os.path.relpath(
-        os.path.dirname(im_files[i]), basepath_in)
-    absolute_folder_out = os.path.join(output_dir, relative_folder_in)
-    if not gfile.IsDirectory(absolute_folder_out):
-      gfile.MakeDirs(absolute_folder_out)
-    output_dirs.append(absolute_folder_out)
-  return output_dirs
+    # Compute padding
+    ratio = r, r  # width, height ratios
+    new_unpad = int(round(shape[1] * r)), int(round(shape[0] * r))
+    dw, dh = new_shape[1] - new_unpad[0], new_shape[0] - new_unpad[1]  # wh padding
+    if auto:  # minimum rectangle
+        dw, dh = np.mod(dw, 32), np.mod(dh, 32)  # wh padding
+    elif scaleFill:  # stretch
+        dw, dh = 0.0, 0.0
+        new_unpad = (new_shape[1], new_shape[0])
+        ratio = new_shape[1] / shape[1], new_shape[0] / shape[0]  # width, height ratios
 
+    dw /= 2  # divide padding into 2 sides
+    dh /= 2
 
-def _recursive_glob(treeroot, pattern):
-  results = []
-  for base, _, files in os.walk(treeroot):
-    files = fnmatch.filter(files, pattern)
-    results.extend(os.path.join(base, f) for f in files)
-  return results
+    if shape[::-1] != new_unpad:  # resize
+        img = cv2.resize(img, new_unpad, interpolation=cv2.INTER_LINEAR)
+    top, bottom = int(round(dh - 0.1)), int(round(dh + 0.1))
+    left, right = int(round(dw - 0.1)), int(round(dw + 0.1))
+    img = cv2.copyMakeBorder(img, top, bottom, left, right, cv2.BORDER_CONSTANT, value=color)  # add border
+    return img, ratio, (dw, dh)
 
-#---------------------------------struct depth main function---------------------------------
-
-def _run_inference(output_dir=output_dir,
-                   file_extension='mp4',
-                   depth=True,
-                   egomotion=False,
-                   model_ckpt=model_ckpt,
-                   input_dir=input_dir,
-                   input_list_file=None,
-                   batch_size=1,
-                   img_height=128,
-                   img_width=416,
-                   seq_length=3,
-                   architecture=nets.RESNET,
-                   imagenet_norm=True,
-                   use_skip=True,
-                   joint_encoder=True,
-                   shuffle=False,
-                   flip_for_depth=False,
-                   inference_mode=INFERENCE_MODE_SINGLE,
-                   inference_crop=INFERENCE_CROP_NONE,
-                   use_masks=False):
-
-  inference_model = model.Model(is_training=False,
-                                batch_size=batch_size,
-                                img_height=img_height,
-                                img_width=img_width,
-                                seq_length=seq_length,
-                                architecture=architecture,
-                                imagenet_norm=imagenet_norm,
-                                use_skip=use_skip,
-                                joint_encoder=joint_encoder)
-  vars_to_restore = util.get_vars_to_save_and_restore(model_ckpt)
-  saver = tf.train.Saver(vars_to_restore)
-  sv = tf.train.Supervisor(logdir='/tmp/', saver=None)
-  with sv.managed_session() as sess:
-    saver.restore(sess, model_ckpt)
-    if not gfile.Exists(output_dir):
-      gfile.MakeDirs(output_dir)
-    logging.info('Predictions will be saved in %s.', output_dir)
-
-    # Collect all images to run inference on.
-    #im_files, basepath_in = collect_input_images(input_dir, input_list_file,file_extension)
-    #if shuffle:
-    #  logging.info('Shuffling data...')
-    #  np.random.shuffle(im_files)
-    #logging.info('Running inference on %d files.', len(im_files))
-
-    # Create missing output folders and pre-compute target directories.
-    #output_dirs = create_output_dirs(im_files, basepath_in, output_dir)
-
-    #--------------------------------------------------------------
-    #Here to use while by koyo
-    vid = cv2.VideoCapture('input_video/short_traffic_demo.mp4')
-    vid_width = int(vid.get(cv2.CAP_PROP_FRAME_WIDTH))
-    vid_height = int(vid.get(cv2.CAP_PROP_FRAME_HEIGHT))
-    vid_size = (vid_width, vid_height)
-    vid_frame = int(vid.get(cv2.CAP_PROP_FPS))
-    
-    fmt = cv2.VideoWriter_fourcc('m','p','4','v')
-    writer = cv2.VideoWriter('test_output/test.mp4', fmt, vid_frame, vid_size)
-
-    while(vid.isOpened()):
-        ret, frame = vid.read()
-        
-        frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-        # Run depth prediction network.
-        if depth:
-            im_batch = []
-            for i in range(len(frame)):
-                if i % 100 == 0:
-                    logging.info('%s of %s files processed.', i, len(frame))
-
-                # Read image and run inference.
-                if inference_mode == INFERENCE_MODE_SINGLE:
-                    if inference_crop == INFERENCE_CROP_NONE:
-                        im = util.load_image(frame[i], resize=(img_width, img_height))
-                    elif inference_crop == INFERENCE_CROP_CITYSCAPES:
-                        im = util.crop_cityscapes(util.load_image(frame[i]),resize=(img_width, img_height))
-                elif inference_mode == INFERENCE_MODE_TRIPLETS:
-                    im = util.load_image(frame[i], resize=(img_width * 3, img_height))
-                    im = im[:, img_width:img_width*2]
-                if flip_for_depth:
-                    im = np.flip(im, axis=1)
-                im_batch.append(im)
-
-                if len(im_batch) == batch_size or i == len(frame) - 1:
-                # Call inference on batch.
-                    for _ in range(batch_size - len(im_batch)):  # Fill up batch.
-                        im_batch.append(np.zeros(shape=(img_height, img_width, 3),dtype=np.float32))
-                    im_batch = np.stack(im_batch, axis=0)
-                    est_depth = inference_model.inference_depth(im_batch, sess)
-                    if flip_for_depth:
-                        est_depth = np.flip(est_depth, axis=2)
-                        im_batch = np.flip(im_batch, axis=2)
-
-                for j in range(len(im_batch)):
-                    color_map = util.normalize_depth_for_display(np.squeeze(est_depth[j]))
-                    visualization = np.concatenate((im_batch[j], color_map), axis=0)
-                    writer.write(visualization)
-                    # Save raw prediction and color visualization. Extract filename
-                    # without extension from full path: e.g. path/to/input_dir/folder1/
-                    # file1.png -> file1
-                    #k = i - len(im_batch) + 1 + j
-                    #filename_root = os.path.splitext(os.path.basename(frame[k]))[0]
-                    #pref = '_flip' if flip_for_depth else ''
-                    #output_raw = os.path.join(output_dirs[k], filename_root + pref + '.npy')
-                    #output_vis = os.path.join(output_dirs[k], filename_root + pref + '.png')
-                    #with gfile.Open(output_raw, 'wb') as f:
-                    #  np.save(f, est_depth[j])
-                    #util.save_image(output_vis, visualization, file_extension)
-                #inputsource = im_batch
-                #print ('Print here im_batch test')
-                #print (len(im_batch))
-                im_batch = []
-                writer.release()
-        
-
-        # Run egomotion network.
-        if egomotion:
-            if inference_mode == INFERENCE_MODE_SINGLE:
-                # Run regular egomotion inference loop.
-                input_image_seq = []
-                input_seg_seq = []
-                current_sequence_dir = None
-                current_output_handle = None
-                for i in range(len(frame)):
-                    sequence_dir = os.path.dirname(frame[i])
-                    if sequence_dir != current_sequence_dir:
-                        # Assume start of a new sequence, since this image lies in a
-                        # different directory than the previous ones.
-                        # Clear egomotion input buffer.
-                        output_filepath = os.path.join(output_dirs[i], 'egomotion.txt')
-                        if current_output_handle is not None:
-                            current_output_handle.close()
-                        current_sequence_dir = sequence_dir
-                        logging.info('Writing egomotion sequence to %s.', output_filepath)
-                        current_output_handle = gfile.Open(output_filepath, 'w')
-                        input_image_seq = []
-                    im = util.load_image(frame[i], resize=(img_width, img_height))
-                    input_image_seq.append(im)
-                    if use_masks:
-                        im_seg_path = frame[i].replace('.%s' % file_extension, '-seg.%s' % file_extension)
-                        if not gfile.Exists(im_seg_path):
-                            raise ValueError('No segmentation mask has been found for image. If none are available, disable use_masks.' % (im_seg_path, frame[i]))
-                        input_seg_seq.append(util.load_image(im_seg_path, resize=(img_width, img_height), interpolation='nn'))
-
-                    if len(input_image_seq) < seq_length:  # Buffer not filled yet.
-                        continue
-                    if len(input_image_seq) > seq_length:  # Remove oldest entry.
-                        del input_image_seq[0]
-                        if use_masks:
-                            del input_seg_seq[0]
-
-                    input_image_stack = np.concatenate(input_image_seq, axis=2)
-                    input_image_stack = np.expand_dims(input_image_stack, axis=0)
-                    if use_masks:
-                        input_image_stack = mask_image_stack(input_image_stack, input_seg_seq)
-                    est_egomotion = np.squeeze(inference_model.inference_egomotion(input_image_stack, sess))
-                    egomotion_str = []
-                    for j in range(seq_length - 1):
-                        egomotion_str.append(','.join([str(d) for d in est_egomotion[j]]))
-                    current_output_handle.write( str(i) + ' ' + ' '.join(egomotion_str) + '\n')
-                if current_output_handle is not None:
-                    current_output_handle.close()
-            elif inference_mode == INFERENCE_MODE_TRIPLETS:
-                written_before = []
-                for i in range(len(frame)):
-                    im = util.load_image(frame[i], resize=(img_width * 3, img_height))
-                    input_image_stack = np.concatenate([im[:, :img_width], im[:, img_width:img_width*2],im[:, img_width*2:]], axis=2)
-                    input_image_stack = np.expand_dims(input_image_stack, axis=0)
-                    if use_masks:
-                        im_seg_path = frame[i].replace('.%s' % file_extension,'-seg.%s' % file_extension)
-                        if not gfile.Exists(im_seg_path):
-                            raise ValueError('No segmentation mask %s has been found for image %s. If none are available, disable use_masks.' % (im_seg_path, frame[i]))
-                        seg = util.load_image(im_seg_path, resize=(img_width * 3, img_height), interpolation='nn')
-                        input_seg_seq = [seg[:, :img_width], seg[:, img_width:img_width*2], seg[:, img_width*2:]]
-                        input_image_stack = mask_image_stack(input_image_stack, input_seg_seq)
-                    est_egomotion = inference_model.inference_egomotion(input_image_stack, sess)
-                    est_egomotion = np.squeeze(est_egomotion)
-                    egomotion_1_2 = ','.join([str(d) for d in est_egomotion[0]])
-                    egomotion_2_3 = ','.join([str(d) for d in est_egomotion[1]])
-
-                    output_filepath = os.path.join(output_dirs[i], 'egomotion.txt')
-                    file_mode = 'w' if output_filepath not in written_before else 'a'
-                    with gfile.Open(output_filepath, file_mode) as current_output_handle:
-                        current_output_handle.write(str(i) + ' ' + egomotion_1_2 + ' ' + egomotion_2_3 + '\n')
-                    written_before.append(output_filepath)
-
-
-
-#------------------------------------------YOLO v3----------------------------------------
-
+#----------------------------------------------------------------------------------------------------------------------
 #get bbox and color data
 
 color_data = []
 
 #from https://qiita.com/yasudadesu/items/dd3e74dcc7e8f72bc680
+
 def drow_texts(img, x, y, texts, font_scale, color, thickness):
     initial_y = 0
     dy = int (img.shape[0] / 20)
@@ -311,11 +103,11 @@ def color_detection(img, xy, color=None):
 
     #wite color data on the depth
     color = color or [random.randint(0, 255) for _ in range(3)]
-    tl = round(0.002 * (img.shape[0] + img.shape[1]) / 2)
+    tl = round(0.002 * (img.shape[0] + img.shape[1]) / 2) 
     text = ["B: %.2f" % (b), "G: %.2f" % (g), "R: %.2f" % (r)]
     drow_texts(img, boxFromX, boxFromY, text, 0.3, color, tl)
 
-#----------------------------------------------------------------------------------------------------------------------
+
 #write bbox on depth trying
 def plot_bbox_and_depth(x, img, color=None, label=None, line_thickness=None):
     # Plots one bounding box on image img
@@ -332,166 +124,235 @@ def plot_bbox_and_depth(x, img, color=None, label=None, line_thickness=None):
     harf_ymax = int(img.shape[0] / 2)
     k1, k2 = (int(x[0]), int(x[1]) + harf_ymax), (int(x[2]), int(x[3]) + harf_ymax)
     cv2.rectangle(img, k1, k2, color, thickness=tl, lineType=cv2.LINE_AA)
-    print('wote on the depth')
-
-#yolov3
-def detect(save_img=False):
-    img_size = 512
-    out = 'output'
-    source = 'semioutput'
-    weights = 'weights/yolov3-spp-ultralytics.pt'
-    cfg_ = 'cfg/yolov3-spp.cfg'
-    names_ = 'data/coco.names'
-    fourcc = 'mp4'
-    half = opt.half
-    view_img = opt.view_img
-    save_txt = opt.save_txt
-
-    imgsz = img_size
-    webcam = source == '0' or source.startswith('rtsp') or source.startswith('http') or source.endswith('.txt')
-
-    # Initialize
-    device = torch_utils.select_device(device='cpu' if ONNX_EXPORT else opt.device)
-    if os.path.exists(out):
-        shutil.rmtree(out)  # delete output folder
-    os.makedirs(out)  # make new output folder
-
-    # Initialize model
-    model = Darknet(cfg_, imgsz)
-
-    # Load weights
-    attempt_download(weights)
-    if weights.endswith('.pt'):  # pytorch format
-        model.load_state_dict(torch.load(weights, map_location=device)['model'])
-    else:  # darknet format
-        load_darknet_weights(model, weights)
-
-    # Second-stage classifier
-    classify = False
-    if classify:
-        modelc = torch_utils.load_classifier(name='resnet101', n=2)  # initialize
-        modelc.load_state_dict(torch.load('weights/resnet101.pt', map_location=device)['model'])  # load weights
-        modelc.to(device).eval()
-
-    # Eval mode
-    model.to(device).eval()
-
-    # Fuse Conv2d + BatchNorm2d layers
-    # model.fuse()
-    half = half and device.type != 'cpu'  # half precision only supported on CUDA
-    if half:
-        model.half()
-
-    # Set Dataloader
-    vid_path, vid_writer = None, None
-    if webcam:
-        view_img = True
-        torch.backends.cudnn.benchmark = True  # set True to speed up constant image size inference
-        dataset = LoadStreams(source, img_size=imgsz)
-    else:
-        save_img = True
-        dataset = LoadImages(source, img_size=imgsz)
-
-    # Get names and colors
-    names = load_classes(names_)
-    colors = [[random.randint(0, 255) for _ in range(3)] for _ in range(len(names))]
-
-    # Run inference
-    t0 = time.time()
-    img = torch.zeros((1, 3, imgsz, imgsz), device=device)  # init img
-    _ = model(img.half() if half else img.float()) if device.type != 'cpu' else None  # run once
-    for path, img, im0s, vid_cap in dataset:
-        img = torch.from_numpy(img).to(device)
-        img = img.half() if half else img.float()  # uint8 to fp16/32
-        img /= 255.0  # 0 - 255 to 0.0 - 1.0
-        if img.ndimension() == 3:
-            img = img.unsqueeze(0)
-
-        # Inference
-        t1 = torch_utils.time_synchronized()
-        pred = model(img, augment=opt.augment)[0]
-        t2 = torch_utils.time_synchronized()
-
-        # to float
-        if half:
-            pred = pred.float()
-
-        # Apply NMS
-        pred = non_max_suppression(pred, opt.conf_thres, opt.iou_thres,
-                                   multi_label=False, classes=opt.classes, agnostic=opt.agnostic_nms)
-
-        # Apply Classifier
-        if classify:
-            pred = apply_classifier(pred, modelc, img, im0s)
-
-        # Process detections
-        for i, det in enumerate(pred):  # detections for image i
-            if webcam:  # batch_size >= 1
-                p, s, im0 = path[i], '%g: ' % i, im0s[i].copy()
-            else:
-                p, s, im0 = path, '', im0s
-
-            save_path = str(Path(out) / Path(p).name)
-            s += '%gx%g ' % img.shape[2:]  # print string
-            gn = torch.tensor(im0.shape)[[1, 0, 1, 0]]  #  normalization gain whwh
-            if det is not None and len(det):
-                # Rescale boxes from imgsz to im0 size
-                det[:, :4] = scale_coords(img.shape[2:], det[:, :4], im0.shape).round()
-
-                # Print results
-                for c in det[:, -1].detach().unique():
-                    n = (det[:, -1] == c).sum()  # detections per class
-                    s += '%g %ss, ' % (n, names[int(c)])  # add to string
-
-                # Write results
-                for *xyxy, conf, cls in reversed(det):
-                    if save_txt:  # Write to file
-                        xywh = (xyxy2xywh(torch.tensor(xyxy).view(1, 4)) / gn).view(-1).tolist()  # normalized xywh
-                        with open(save_path[:save_path.rfind('.')] + '.txt', 'a') as file:
-                            file.write(('%g ' * 5 + '\n') % (cls, *xywh))  # label format
-
-                    if save_img or view_img:  # Add bbox to image
-                        label = '%s %.2f' % (names[int(cls)], conf)
-                        plot_bbox_and_depth(xyxy, im0, label=label, color=colors[int(cls)])
-                        color_detection(im0, xyxy, color=colors[int(cls)])
 
 
-            # Print time (inference + NMS)
-            print('%sDone. (%.3fs)' % (s, t2 - t1))
 
-            # Stream results
-            if view_img:
-                cv2.imshow(p, im0)
-                if cv2.waitKey(1) == ord('q'):  # q to quit
-                    raise StopIteration
+def mask_image_stack(input_image_stack, input_seg_seq):
+  background = [mask == 0 for mask in input_seg_seq]
+  background = reduce(lambda m1, m2: m1 & m2, background)
+  # If masks are RGB, assume all channels to be the same. Reduce to the first.
+  if background.ndim == 3 and background.shape[2] > 1:
+    background = np.expand_dims(background[:, :, 0], axis=2)
+  elif background.ndim == 2:  # Expand.
+    background = np.expand_dism(background, axis=2)
+  # background is now of shape (H, W, 1).
+  background_stack = np.tile(background, [1, 1, input_image_stack.shape[3]])
+  return np.multiply(input_image_stack, background_stack)
 
-            # Save results (image with detections)
-            if save_img:
-                if dataset.mode == 'images':
-                    cv2.imwrite(save_path, im0)
-                else:
-                    if vid_path != save_path:  # new video
-                        vid_path = save_path
-                        if isinstance(vid_writer, cv2.VideoWriter):
-                            vid_writer.release()  # release previous video writer
+def create_output_dirs(im_files, basepath_in, output_dir):
+  """Creates required directories, and returns output dir for each file."""
+  output_dirs = []
+  for i in range(len(im_files)):
+    relative_folder_in = os.path.relpath(
+        os.path.dirname(im_files[i]), basepath_in)
+    absolute_folder_out = os.path.join(output_dir, relative_folder_in)
+    if not gfile.IsDirectory(absolute_folder_out):
+      gfile.MakeDirs(absolute_folder_out)
+    output_dirs.append(absolute_folder_out)
+  return output_dirs
 
-                        fps = vid_cap.get(cv2.CAP_PROP_FPS)
-                        w = int(vid_cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-                        h = int(vid_cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-                        vid_writer = cv2.VideoWriter(save_path, cv2.VideoWriter_fourcc(*fourcc), fps, (w, h))
-                    vid_writer.write(im0)
 
-    if save_txt or save_img:
-        print('Results saved to %s' % os.getcwd() + os.sep + out)
-        if platform == 'darwin':  # MacOS
-            os.system('open ' + save_path)
+def _recursive_glob(treeroot, pattern):
+  results = []
+  for base, _, files in os.walk(treeroot):
+    files = fnmatch.filter(files, pattern)
+    results.extend(os.path.join(base, f) for f in files)
+  return results
 
-    print('YOLO v3 Done. (%.3fs)' % (time.time() - t0))
+INFERENCE_MODE_SINGLE = 'single'  # Take plain single-frame input.
+INFERENCE_MODE_TRIPLETS = 'triplets' 
+INFERENCE_CROP_NONE = 'none'
+INFERENCE_CROP_CITYSCAPES = 'cityscapes'
+model_ckpt = 'model/KITTI/model-199160'
 
-#----------------------------------------------Application --------------------------------------
+video_data = 'short_traffic_demo.mp4'
+output_dir = 'test_output'
+
+#--------------------------------------yolo main--------------------------------------------
+
+def detect(source, save_img=True):
+  weights = opt.weights
+  view_img = opt.view_img
+  save_txt = opt.save_txt
+
+  # Initialize
+  set_logging()
+  device = select_device(opt.device)
+  half = device.type != 'cpu'  # half precision only supported on CUDA
+
+  # Load model
+  model = attempt_load(weights, map_location=device)  # load FP32 model
+  #imgsz = check_img_size(imgsz, s=model.stride.max())  # check img_size
+  if half:
+      model.half()  # to FP16
+
+  # Second-stage classifier
+  classify = False
+  #if classify:
+  #  modelc = load_classifier(name='resnet101', n=2)  # initialize
+  #  modelc.load_state_dict(torch.load('weights/resnet101.pt', map_location=device)['model']).to(device).eval()  
+
+  img0 = source  # BGR
+  img = letterbox(img0, new_shape=output_size)[0]
+  img = img[:, :, ::-1].transpose(2, 0, 1)  # BGR to RGB, to 3x416x416
+  img = np.ascontiguousarray(img)
+
+  # Get names and colors
+  names = model.module.names if hasattr(model, 'module') else model.names
+  colors = [[random.randint(0, 255) for _ in range(3)] for _ in names]
+
+  # Run inference
+  #img = torch.zeros((1, 3, imgsz, imgsz), device=device)  # init img
+  img = torch.from_numpy(img).to(device)
+  im0s = img0
+  img = img.half() if half else img.float()  # uint8 to fp16/32
+  img /= 255.0  # 0 - 255 to 0.0 - 1.0
+  if img.ndimension() == 3:
+    img = img.unsqueeze(0)
+
+  # Inference
+  pred = model(img, augment=opt.augment)[0]
+
+  # Apply NMS
+  pred = non_max_suppression(pred, opt.conf_thres, opt.iou_thres, classes=opt.classes, agnostic=opt.agnostic_nms)
+
+  # Apply Classifier
+  if classify:
+    pred = apply_classifier(pred, modelc, img, im0s)
+
+  # Process detections
+  for i, det in enumerate(pred):  # detections per image
+    s, im0 = '', im0s
+    s += '%gx%g ' % img.shape[2:]  # print string
+    gn = torch.tensor(im0.shape)[[1, 0, 1, 0]]  # normalization gain whwh
+    if det is not None and len(det):
+      # Rescale boxes from img_size to im0 size
+      det[:, :4] = scale_coords(img.shape[2:], det[:, :4], im0.shape).round()
+
+      # Print results
+      for c in det[:, -1].unique():
+        n = (det[:, -1] == c).sum()  # detections per class
+        s += '%g %ss, ' % (n, names[int(c)])  # add to string
+
+
+      # Write results
+      for *xyxy, conf, cls in reversed(det):
+        if save_img or view_img:  # Add bbox to image
+          logging.info(cls)
+          if cls == 2 or cls == 5 or cls == 7:
+            label = '%s %.2f' % (names[int(cls)], conf)
+            plot_bbox_and_depth(xyxy, im0, label=label, color=colors[int(cls)])
+            #color_detection(im0, xyxy, color=colors[int(cls)])
+            logging.info('plot bbox')
+
+
+#--------------------------------------------------------------------------------------------------
+
+
+def run_inference(output_dir=output_dir,
+                   file_extension='png',
+                   depth=True,
+                   egomotion=False,
+                   model_ckpt=model_ckpt,
+                   input_list_file=None,
+                   batch_size=1,
+                   img_height=256,
+                   img_width=416,
+                   seq_length=3,
+                   architecture=nets.RESNET,
+                   imagenet_norm=True,
+                   use_skip=True,
+                   joint_encoder=True,
+                   shuffle=False,
+                   flip_for_depth=False,
+                   inference_mode=INFERENCE_MODE_SINGLE,
+                   inference_crop=INFERENCE_CROP_NONE,
+                   use_masks=False):
+  inference_model = model.Model(is_training=False,
+                                batch_size=batch_size,
+                                img_height=img_height,
+                                img_width=img_width,
+                                seq_length=seq_length,
+                                architecture=architecture,
+                                imagenet_norm=imagenet_norm,
+                                use_skip=use_skip,
+                                joint_encoder=joint_encoder)
+                                
+  vars_to_restore = util.get_vars_to_save_and_restore(model_ckpt)
+  saver = tf.train.Saver(vars_to_restore)
+  sv = tf.train.Supervisor(logdir='/tmp/', saver=None)
+  with sv.managed_session() as sess:
+    saver.restore(sess, model_ckpt)
+    if not gfile.Exists(output_dir):
+      gfile.MakeDirs(output_dir)
+    logging.info('Predictions will be saved in %s.', output_dir)
+
+    #input camera image
+    video_capture = cv2.VideoCapture(video_data)
+    fourcc = cv2.VideoWriter_fourcc('m', 'p', '4', 'v')
+    fps = int(video_capture.get(cv2.CAP_PROP_FPS))
+    out = cv2.VideoWriter(output_dir + '/' + 'try_1229.mp4', fourcc, fps, output_size)
+    frame_count = (int(video_capture.get(cv2.CAP_PROP_FRAME_COUNT)))
+
+
+    while True:
+      if depth:
+
+        im_batch = []
+
+        for i in range(frame_count):
+
+          if i % 100 == 0:
+            logging.info('%s of %s files processed.', i, range(frame_count))
+
+          # struct2depth ここから ---------------------------
+          ret, im = video_capture.read()
+
+          im = cv2.cvtColor(im, cv2.COLOR_BGR2RGB)
+          im = cv2.resize(im, (img_width, img_height))
+          im = np.array(im, dtype=np.float32) / 255.0
+
+          im_batch.append(im)
+          for _ in range(batch_size - len(im_batch)):  # Fill up batch.
+            im_batch.append(np.zeros(shape=(img_height, img_width, 3), dtype=np.float32))
+
+          im_batch = np.stack(im_batch, axis=0)
+          est_depth = inference_model.inference_depth(im_batch, sess)
+          
+          color_map = util.normalize_depth_for_display(np.squeeze(est_depth))
+          image_frame = np.concatenate((im_batch[0], color_map), axis=0)
+          #logging.info(image_frame.shape)
+          image_frame = (image_frame * 255.0).astype(np.uint8)
+          image_frame = cv2.cvtColor(image_frame, cv2.COLOR_RGB2BGR)
+          #structdepth　ここまで ---------------------------
+
+          detect(image_frame) #yolo
+
+          out.write(image_frame)
+          logging.info('Frame written')
+          im_batch = []
+
+    logging.info('Done.')
+    video_capture.release()
+    out.release()
+
 
 def main(_):
-  _run_inference()
+  run_inference()
 
 if __name__ == '__main__':
-  app.run(main)
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--weights', nargs='+', type=str, default='yolov5s.pt', help='model.pt path(s)')
+    parser.add_argument('--classes', nargs='+', type=int, help='filter by class')
+    parser.add_argument('--conf-thres', type=float, default=0.3, help='object confidence threshold')
+    parser.add_argument('--iou-thres', type=float, default=0.6, help='IOU threshold for NMS')
+    parser.add_argument('--agnostic-nms', action='store_true', help='class-agnostic NMS')
+    parser.add_argument('--device', default='', help='device id (i.e. 0 or 0,1) or cpu')
+    parser.add_argument('--augment', action='store_true', help='augmented inference')
+    parser.add_argument('--half', action='store_true', help='half precision FP16 inference')
+    parser.add_argument('--view-img', action='store_true', help='display results')
+    parser.add_argument('--save-txt', action='store_true', help='save results to *.txt')
+    parser.add_argument('--update', action='store_true', help='update all models')
+    opt = parser.parse_args()
+
+    app.run(main)
