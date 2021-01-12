@@ -85,7 +85,7 @@ def drow_texts(img, x, y, texts, font_scale, color, thickness):
         cv2.putText(img, text, (x, offset_y), cv2.FONT_HERSHEY_SIMPLEX, font_scale, color, thickness, cv2.LINE_AA)
 
 
-def color_detection(img, xy, color=None):
+def color_detection(img, xy, traffic_jam, color=None):
     harf_height = int(img.shape[0] / 2)
     #get box area
     boxFromX = int(xy[0])
@@ -96,16 +96,20 @@ def color_detection(img, xy, color=None):
     #get box
     imgBox = img[boxFromY: boxToY, boxFromX:boxToX]
 
-    #flatten and out RGB mean
-    b = int(imgBox.T[0].flatten().mean())
-    g = int(imgBox.T[1].flatten().mean())
-    r = int(imgBox.T[2].flatten().mean())
+    # flattenで一次元化しmeanで平均を取得 
+    #b = imgBox.T[0].flatten().max()
+    g = imgBox.T[1].flatten().mean()
+    r = imgBox.T[2].flatten().mean()
 
     #wite color data on the depth
     color = color or [random.randint(0, 255) for _ in range(3)]
     tl = round(0.002 * (img.shape[0] + img.shape[1]) / 2) 
-    text = ["B: %.2f" % (b), "G: %.2f" % (g), "R: %.2f" % (r)]
+    tl2 = round(0.005 * (img.shape[0] + img.shape[1]) / 2) 
+    text = ["G: %.2f" % (g), "R: %.2f" % (r)]
     drow_texts(img, boxFromX, boxFromY, text, 0.3, color, tl)
+    if g > 100 :
+      drow_texts(img, 0, 0, 'Traffic_Jam', 0.3, (255,255,255), tl)
+      traffic_jam = True
 
 
 #write bbox on depth trying
@@ -165,8 +169,9 @@ INFERENCE_CROP_NONE = 'none'
 INFERENCE_CROP_CITYSCAPES = 'cityscapes'
 model_ckpt = 'model/KITTI/model-199160'
 
-video_data = 'short_traffic_demo.mp4'
+video_data = 'Pickup_01/20210110_160229_7630.MOV'
 output_dir = 'test_output'
+video_name = 'try_0111.mp4'
 
 #--------------------------------------yolo main--------------------------------------------
 
@@ -174,6 +179,7 @@ def detect(source, save_img=True):
   weights = opt.weights
   view_img = opt.view_img
   save_txt = opt.save_txt
+  traffic_jam = False
 
   # Initialize
   set_logging()
@@ -242,7 +248,10 @@ def detect(source, save_img=True):
           if cls == 2 or cls == 5 or cls == 7:
             label = '%s %.2f' % (names[int(cls)], conf)
             plot_bbox_and_depth(xyxy, im0, label=label, color=colors[int(cls)])
-            #color_detection(im0, xyxy, color=colors[int(cls)])
+            color_detection(im0, xyxy, traffic_jam, color=colors[int(cls)])
+            if traffic_jam == True:
+              logging.info('Traffic JAM !!!!!!!!!!!!')
+              traffic_jam = False
             logging.info('plot bbox')
 
 
@@ -291,7 +300,7 @@ def run_inference(output_dir=output_dir,
     video_capture = cv2.VideoCapture(video_data)
     fourcc = cv2.VideoWriter_fourcc('m', 'p', '4', 'v')
     fps = int(video_capture.get(cv2.CAP_PROP_FPS))
-    out = cv2.VideoWriter(output_dir + '/' + 'try_1229.mp4', fourcc, fps, output_size)
+    out = cv2.VideoWriter(output_dir + '/' + video_name, fourcc, fps, output_size)
     frame_count = (int(video_capture.get(cv2.CAP_PROP_FRAME_COUNT)))
 
 
