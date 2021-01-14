@@ -33,6 +33,21 @@ from utils.torch_utils import select_device, load_classifier, time_synchronized
 img_w = 416
 img_h = 512
 output_size=(img_w, img_h)
+weight1 = 138
+weight2 = 278
+
+jam_counter = 0
+
+INFERENCE_MODE_SINGLE = 'single'  # Take plain single-frame input.
+INFERENCE_MODE_TRIPLETS = 'triplets' 
+INFERENCE_CROP_NONE = 'none'
+INFERENCE_CROP_CITYSCAPES = 'cityscapes'
+model_ckpt = 'model/KITTI/model-199160'
+
+input_dir = 'short_traffic_demo.mp4'
+output_dir = 'test_output'
+video_name = 'try_0114.mp4'
+
 
 #------------------
 def letterbox(img, new_shape=(640, 640), color=(114, 114, 114), auto=True, scaleFill=False, scaleup=True):
@@ -85,7 +100,8 @@ def drow_texts(img, x, y, texts, font_scale, color, thickness):
         cv2.putText(img, text, (x, offset_y), cv2.FONT_HERSHEY_SIMPLEX, font_scale, color, thickness, cv2.LINE_AA)
 
 
-def color_detection(img, xy, traffic_jam, color=None):
+def color_detection(img, xy, color=None):
+    global jam_counter
     harf_height = int(img.shape[0] / 2)
     #get box area
     boxFromX = int(xy[0])
@@ -106,10 +122,13 @@ def color_detection(img, xy, traffic_jam, color=None):
     tl = round(0.002 * (img.shape[0] + img.shape[1]) / 2) 
     tl2 = round(0.005 * (img.shape[0] + img.shape[1]) / 2) 
     text = ["G: %.2f" % (g), "R: %.2f" % (r)]
+    
     drow_texts(img, boxFromX, boxFromY, text, 0.3, color, tl)
     if g > 100 :
-      drow_texts(img, 0, 0, 'Traffic_Jam', 0.3, (255,255,255), tl)
-      traffic_jam = True
+      drow_texts(img, 0, 0, 'Traffic_Jam', 0.5, (255,255,255), tl)
+      jam_counter += 1
+    drow_texts(img, 0, harf_height, 'Jam Counter : %s' % jam_counter , 0.5, (255,255,255), tl)
+  
 
 
 #write bbox on depth trying
@@ -163,23 +182,12 @@ def _recursive_glob(treeroot, pattern):
     results.extend(os.path.join(base, f) for f in files)
   return results
 
-INFERENCE_MODE_SINGLE = 'single'  # Take plain single-frame input.
-INFERENCE_MODE_TRIPLETS = 'triplets' 
-INFERENCE_CROP_NONE = 'none'
-INFERENCE_CROP_CITYSCAPES = 'cityscapes'
-model_ckpt = 'model/KITTI/model-199160'
-
-video_data = 'Pickup_01/20210110_160229_7630.MOV'
-output_dir = 'test_output'
-video_name = 'try_0111.mp4'
-
 #--------------------------------------yolo main--------------------------------------------
 
-def detect(source, save_img=True):
+def detect(source, save_img=True, weight=False):
   weights = opt.weights
   view_img = opt.view_img
   save_txt = opt.save_txt
-  traffic_jam = False
 
   # Initialize
   set_logging()
@@ -202,6 +210,7 @@ def detect(source, save_img=True):
   img = letterbox(img0, new_shape=output_size)[0]
   img = img[:, :, ::-1].transpose(2, 0, 1)  # BGR to RGB, to 3x416x416
   img = np.ascontiguousarray(img)
+
 
   # Get names and colors
   names = model.module.names if hasattr(model, 'module') else model.names
@@ -242,17 +251,23 @@ def detect(source, save_img=True):
 
 
       # Write results
-      for *xyxy, conf, cls in reversed(det):
-        if save_img or view_img:  # Add bbox to image
-          logging.info(cls)
-          if cls == 2 or cls == 5 or cls == 7:
-            label = '%s %.2f' % (names[int(cls)], conf)
-            plot_bbox_and_depth(xyxy, im0, label=label, color=colors[int(cls)])
-            color_detection(im0, xyxy, traffic_jam, color=colors[int(cls)])
-            if traffic_jam == True:
-              logging.info('Traffic JAM !!!!!!!!!!!!')
-              traffic_jam = False
-            logging.info('plot bbox')
+      if weight:
+        for *xyxy, conf, cls in reversed(det):
+          if save_img or view_img:  # Add bbox to image
+            #logging.info(xyxy)
+            if cls == 2 or cls == 5 or cls == 7:
+              if weight1 < xyxy[0] < weight2:
+                label = '%s %.2f' % (names[int(cls)], conf)
+                plot_bbox_and_depth(xyxy, im0, label=label, color=colors[int(cls)])
+                color_detection(im0, xyxy, color=colors[int(cls)])
+      
+      else:
+        for *xyxy, conf, cls in reversed(det):
+          if save_img or view_img:  # Add bbox to image
+            if cls == 2 or cls == 5 or cls == 7:
+              label = '%s %.2f' % (names[int(cls)], conf)
+              plot_bbox_and_depth(xyxy, im0, label=label, color=colors[int(cls)])
+              color_detection(im0, xyxy, color=colors[int(cls)])
 
 
 #--------------------------------------------------------------------------------------------------
@@ -296,13 +311,16 @@ def run_inference(output_dir=output_dir,
       gfile.MakeDirs(output_dir)
     logging.info('Predictions will be saved in %s.', output_dir)
 
+    #video_data = opt.source
+
     #input camera image
-    video_capture = cv2.VideoCapture(video_data)
+    video_capture = cv2.VideoCapture(input_dir)
     fourcc = cv2.VideoWriter_fourcc('m', 'p', '4', 'v')
     fps = int(video_capture.get(cv2.CAP_PROP_FPS))
     out = cv2.VideoWriter(output_dir + '/' + video_name, fourcc, fps, output_size)
     frame_count = (int(video_capture.get(cv2.CAP_PROP_FRAME_COUNT)))
 
+    global jam_counter
 
     while True:
       if depth:
@@ -311,35 +329,37 @@ def run_inference(output_dir=output_dir,
 
         for i in range(frame_count):
 
-          if i % 100 == 0:
-            logging.info('%s of %s files processed.', i, range(frame_count))
+          if i != frame_count:
 
-          # struct2depth ここから ---------------------------
-          ret, im = video_capture.read()
+            if i % 100 == 0:
+              logging.info('%s of %s files processed.', i, range(frame_count))
 
-          im = cv2.cvtColor(im, cv2.COLOR_BGR2RGB)
-          im = cv2.resize(im, (img_width, img_height))
-          im = np.array(im, dtype=np.float32) / 255.0
+            # struct2depth ここから ---------------------------
+            ret, im = video_capture.read()
 
-          im_batch.append(im)
-          for _ in range(batch_size - len(im_batch)):  # Fill up batch.
-            im_batch.append(np.zeros(shape=(img_height, img_width, 3), dtype=np.float32))
+            im = cv2.cvtColor(im, cv2.COLOR_BGR2RGB)
+            im = cv2.resize(im, (img_width, img_height))
+            im = np.array(im, dtype=np.float32) / 255.0
 
-          im_batch = np.stack(im_batch, axis=0)
-          est_depth = inference_model.inference_depth(im_batch, sess)
-          
-          color_map = util.normalize_depth_for_display(np.squeeze(est_depth))
-          image_frame = np.concatenate((im_batch[0], color_map), axis=0)
-          #logging.info(image_frame.shape)
-          image_frame = (image_frame * 255.0).astype(np.uint8)
-          image_frame = cv2.cvtColor(image_frame, cv2.COLOR_RGB2BGR)
-          #structdepth　ここまで ---------------------------
+            im_batch.append(im)
+            for _ in range(batch_size - len(im_batch)):  # Fill up batch.
+              im_batch.append(np.zeros(shape=(img_height, img_width, 3), dtype=np.float32))
 
-          detect(image_frame) #yolo
+            im_batch = np.stack(im_batch, axis=0)
+            est_depth = inference_model.inference_depth(im_batch, sess)
+            
+            color_map = util.normalize_depth_for_display(np.squeeze(est_depth))
+            image_frame = np.concatenate((im_batch[0], color_map), axis=0)
+            #logging.info(image_frame.shape)
+            image_frame = (image_frame * 255.0).astype(np.uint8)
+            image_frame = cv2.cvtColor(image_frame, cv2.COLOR_RGB2BGR)
+            #structdepth　ここまで ---------------------------
 
-          out.write(image_frame)
-          logging.info('Frame written')
-          im_batch = []
+            detect(image_frame) #yolo
+            logging.info(jam_counter)
+            out.write(image_frame)
+            #logging.info('Frame written')
+            im_batch = []
 
     logging.info('Done.')
     video_capture.release()
@@ -351,6 +371,7 @@ def main(_):
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
+    #parser.add_argument('--source', type=str, default='short_demo_2.mp4', help='source')  # file/folder
     parser.add_argument('--weights', nargs='+', type=str, default='yolov5s.pt', help='model.pt path(s)')
     parser.add_argument('--classes', nargs='+', type=int, help='filter by class')
     parser.add_argument('--conf-thres', type=float, default=0.3, help='object confidence threshold')
